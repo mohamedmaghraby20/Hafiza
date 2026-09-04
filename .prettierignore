@@ -1,0 +1,9 @@
+dist/
+node_modules/
+playwright-report/
+test-results/
+pnpm-lock.yaml
+AGENTS.md
+RULES.md
+SYSTEM_DESIGN.md
+TASKS.md

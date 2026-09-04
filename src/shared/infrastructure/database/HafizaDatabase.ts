@@ -49,6 +49,12 @@ export interface AppliedSyncOperation {
   readonly appliedAt: Date;
 }
 
+export interface SyncCursorRecord {
+  readonly deviceId: EntityId;
+  readonly lastSequence: number;
+  readonly updatedAt: Date;
+}
+
 export class HafizaDatabase extends Dexie {
   decks!: EntityTable<PersistedDeck, "id">;
   cards!: EntityTable<PersistedCard, "id">;
@@ -62,6 +68,7 @@ export class HafizaDatabase extends Dexie {
   syncOperations!: EntityTable<SyncOperation, "id">;
   devices!: EntityTable<DeviceRecord, "id">;
   appliedSyncOperations!: EntityTable<AppliedSyncOperation, "id">;
+  syncCursors!: EntityTable<SyncCursorRecord, "deviceId">;
 
   constructor(name = "hafiza") {
     super(name);
@@ -83,6 +90,9 @@ export class HafizaDatabase extends Dexie {
     });
     this.version(3).stores({
       appliedSyncOperations: "id, appliedAt",
+    });
+    this.version(4).stores({
+      syncCursors: "deviceId, updatedAt",
     });
   }
 }

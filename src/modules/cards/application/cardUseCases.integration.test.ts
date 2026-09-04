@@ -11,6 +11,7 @@ import { CreateDeckUseCase, DexieDeckRepository } from "@modules/decks";
 import { LibraryQueries } from "@modules/library";
 import { FixedClock, UuidV7IdGenerator } from "@shared/index";
 import { HafizaDatabase } from "@shared/infrastructure/database";
+import { createCardFixture, createDeckFixture } from "@test/domainFixtures";
 
 describe("deck and card application use cases", () => {
   const ids = new UuidV7IdGenerator();
@@ -93,5 +94,31 @@ describe("deck and card application use cases", () => {
       deviceId,
     });
     expect(await cards.findById(card.value.id)).not.toBeNull();
+  });
+
+  it("counts a large due deck with indexes without truncating its summary", async () => {
+    const deck = createDeckFixture({ id: ids.next(), name: "Large deck" });
+    await decks.save(deck);
+    const records = Array.from({ length: 1_201 }, (_, index) => {
+      const card = createCardFixture(deck.id, {
+        id: ids.next(),
+        front: `Question ${index}`,
+      });
+      return {
+        ...card,
+        active: 1 as const,
+        dueAt: card.scheduling.dueAt,
+        normalizedFront: card.front.toLocaleLowerCase(),
+      };
+    });
+    await database.cards.bulkPut(records);
+
+    const [total, due] = await Promise.all([
+      cards.countByDeck(deck.id),
+      cards.countDue(clock.now(), deck.id),
+    ]);
+
+    expect(total).toBe(1_201);
+    expect(due).toBe(1_201);
   });
 });

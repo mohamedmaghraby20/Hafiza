@@ -19,10 +19,10 @@ export class LibraryQueries {
     const items = await Promise.all(
       deckPage.items.map(async (deck) => {
         const [cards, due] = await Promise.all([
-          this.cards.search({ deckId: deck.id, offset: 0, limit: 1 }),
-          this.cards.listDue(now, deck.id, 1_000),
+          this.cards.countByDeck(deck.id),
+          this.cards.countDue(now, deck.id),
         ]);
-        return { deck, cardCount: cards.total, dueCount: due.length };
+        return { deck, cardCount: cards, dueCount: due };
       }),
     );
     return { items, total: deckPage.total };

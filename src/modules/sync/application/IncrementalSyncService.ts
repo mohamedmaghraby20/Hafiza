@@ -1,11 +1,13 @@
+import { z } from "zod";
+
+import type { Folder, Tag } from "@modules/library";
+import type { ReviewEvent } from "@modules/study";
 import type { EntityId } from "@shared/index";
 import type {
   HafizaDatabase,
   PersistedCard,
   PersistedDeck,
 } from "@shared/infrastructure/database";
-import type { ReviewEvent } from "@modules/study";
-import type { Folder, Tag } from "@modules/library";
 
 import type {
   JournalOperation,
@@ -18,11 +20,15 @@ export interface SyncResult {
   readonly pulled: number;
 }
 
-function wins(
-  remote: { revision: number; updatedAt: Date; updatedByDeviceId: EntityId },
-  local:
-    | { revision: number; updatedAt: Date; updatedByDeviceId: EntityId }
-    | undefined,
+interface ConflictMetadata {
+  readonly revision: number;
+  readonly updatedAt: Date;
+  readonly updatedByDeviceId: EntityId;
+}
+
+export function remoteEntityWins(
+  remote: ConflictMetadata,
+  local: ConflictMetadata | undefined,
 ): boolean {
   if (!local) return true;
   return (
@@ -34,8 +40,62 @@ function wins(
   );
 }
 
+const schedulingSchema = z.object({
+  phase: z.enum(["new", "learning", "review", "relearning"]),
+  dueAt: z.date(),
+  intervalDays: z.number().nonnegative(),
+  easeFactor: z.number().positive(),
+  repetitions: z.number().int().nonnegative(),
+  lapses: z.number().int().nonnegative(),
+});
+
+const syncedSchema = z.object({
+  id: z.string(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
+  revision: z.number().int().positive(),
+  updatedByDeviceId: z.string(),
+  deletedAt: z.date().nullable(),
+});
+
+const payloadSchemas = {
+  deck: syncedSchema.extend({
+    name: z.string(),
+    description: z.string(),
+    folderId: z.string().nullable(),
+    active: z.union([z.literal(0), z.literal(1)]),
+  }),
+  card: syncedSchema.extend({
+    deckId: z.string(),
+    kind: z.literal("basic"),
+    front: z.string(),
+    back: z.string(),
+    scheduling: schedulingSchema,
+    active: z.union([z.literal(0), z.literal(1)]),
+    dueAt: z.date(),
+    normalizedFront: z.string(),
+  }),
+  tag: syncedSchema.extend({ name: z.string() }),
+  folder: syncedSchema.extend({
+    name: z.string(),
+    parentId: z.string().nullable(),
+  }),
+  review: z.object({
+    id: z.string(),
+    cardId: z.string(),
+    sessionId: z.string(),
+    rating: z.enum(["again", "hard", "good", "easy"]),
+    reviewedAt: z.date(),
+    durationMs: z.number().nonnegative(),
+    previousScheduling: schedulingSchema,
+    newScheduling: schedulingSchema,
+    deviceId: z.string(),
+  }),
+} as const;
+
 function revivePayload(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
+  if (value instanceof Date) return value;
   if (Array.isArray(value)) return value.map(revivePayload);
   const dateKeys = new Set([
     "createdAt",
@@ -54,6 +114,16 @@ function revivePayload(value: unknown): unknown {
   );
 }
 
+function validatedPayload(operation: JournalOperation): unknown {
+  const payload = payloadSchemas[operation.entityType].parse(
+    revivePayload(operation.payload),
+  );
+  if (payload.id !== operation.entityId) {
+    throw new Error("A sync operation referenced a different entity ID.");
+  }
+  return payload;
+}
+
 export class IncrementalSyncService {
   constructor(
     private readonly database: HafizaDatabase,
@@ -63,37 +133,73 @@ export class IncrementalSyncService {
   async sync(deviceId: EntityId, accessToken: string): Promise<SyncResult> {
     const journals = await this.remote.list(accessToken);
     let pulled = 0;
-    for (const journal of journals) pulled += await this.apply(journal);
+    for (const journal of journals) {
+      if (journal.deviceId !== deviceId) pulled += await this.apply(journal);
+    }
 
-    const pending = await this.database.syncOperations
-      .where("status")
-      .equals("pending")
-      .sortBy("occurredAt");
+    const pending = (
+      await this.database.syncOperations
+        .where("status")
+        .equals("pending")
+        .sortBy("occurredAt")
+    ).sort(
+      (left, right) =>
+        left.occurredAt.getTime() - right.occurredAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
     if (pending.length === 0) return { pushed: 0, pulled };
+
     const own = journals.find((journal) => journal.deviceId === deviceId);
     const existingIds = new Set(
       own?.operations.map((operation) => operation.id) ?? [],
     );
+    const acknowledgedIds = new Set<EntityId>();
     const additions: JournalOperation[] = [];
+    let sequence = Math.max(
+      0,
+      ...(own?.operations.map((operation) => operation.sequence) ?? []),
+    );
     for (const operation of pending) {
-      if (existingIds.has(operation.id)) continue;
+      if (existingIds.has(operation.id)) {
+        acknowledgedIds.add(operation.id);
+        continue;
+      }
       const payload = await this.payload(
         operation.entityType,
         operation.entityId,
       );
-      if (payload) additions.push({ ...operation, payload });
+      if (!payload) {
+        throw new Error(
+          `Cannot sync missing ${operation.entityType} '${operation.entityId}'.`,
+        );
+      }
+      sequence += 1;
+      additions.push({ ...operation, sequence, payload });
+      acknowledgedIds.add(operation.id);
     }
-    const journal: SyncJournal = {
-      format: "hafiza-sync",
-      formatVersion: 1,
-      deviceId,
-      updatedAt: new Date().toISOString(),
-      operations: [...(own?.operations ?? []), ...additions],
-    };
-    await this.remote.save(journal, accessToken);
-    await this.database.syncOperations.bulkPut(
-      pending.map((operation) => ({ ...operation, status: "synced" as const })),
+
+    if (additions.length > 0) {
+      const journal: SyncJournal = {
+        format: "hafiza-sync",
+        formatVersion: 2,
+        deviceId,
+        updatedAt: new Date().toISOString(),
+        operations: [...(own?.operations ?? []), ...additions],
+      };
+      await this.remote.save(journal, accessToken);
+    }
+
+    const acknowledged = pending.filter((operation) =>
+      acknowledgedIds.has(operation.id),
     );
+    if (acknowledged.length > 0) {
+      await this.database.syncOperations.bulkPut(
+        acknowledged.map((operation) => ({
+          ...operation,
+          status: "synced" as const,
+        })),
+      );
+    }
     return { pushed: additions.length, pulled };
   }
 
@@ -110,39 +216,70 @@ export class IncrementalSyncService {
 
   private apply(journal: SyncJournal): Promise<number> {
     return this.database.transaction("rw", this.database.tables, async () => {
+      const cursor = await this.database.syncCursors.get(journal.deviceId);
+      const operations = [...journal.operations].sort(
+        (left, right) => left.sequence - right.sequence,
+      );
       let applied = 0;
-      for (const operation of journal.operations) {
-        if (await this.database.appliedSyncOperations.get(operation.id))
-          continue;
-        const payload = revivePayload(operation.payload);
-        if (operation.entityType === "card") {
-          const card = payload as PersistedCard;
-          const local = await this.database.cards.get(card.id);
-          if (wins(card, local)) await this.database.cards.put(card);
-        } else if (operation.entityType === "deck") {
-          const deck = payload as PersistedDeck;
-          const local = await this.database.decks.get(deck.id);
-          if (wins(deck, local)) await this.database.decks.put(deck);
-        } else if (operation.entityType === "tag") {
-          const tag = payload as Tag;
-          const local = await this.database.tags.get(tag.id);
-          if (wins(tag, local)) await this.database.tags.put(tag);
-        } else if (operation.entityType === "folder") {
-          const folder = payload as Folder;
-          const local = await this.database.folders.get(folder.id);
-          if (wins(folder, local)) await this.database.folders.put(folder);
-        } else {
-          const review = payload as ReviewEvent;
-          if (!(await this.database.reviews.get(review.id)))
-            await this.database.reviews.add(review);
+      let lastSequence = cursor?.lastSequence ?? 0;
+      for (const operation of operations) {
+        if (operation.sequence <= lastSequence) continue;
+        if (operation.deviceId !== journal.deviceId) {
+          throw new Error(
+            "A journal contains an operation from another device.",
+          );
         }
-        await this.database.appliedSyncOperations.put({
-          id: operation.id,
-          appliedAt: new Date(),
+        const payload = validatedPayload(operation);
+        const alreadyApplied = await this.database.appliedSyncOperations.get(
+          operation.id,
+        );
+        if (!alreadyApplied) {
+          await this.applyOperation(operation, payload);
+          await this.database.appliedSyncOperations.put({
+            id: operation.id,
+            appliedAt: new Date(),
+          });
+          applied += 1;
+        }
+        lastSequence = operation.sequence;
+      }
+      if (lastSequence > (cursor?.lastSequence ?? 0)) {
+        await this.database.syncCursors.put({
+          deviceId: journal.deviceId,
+          lastSequence,
+          updatedAt: new Date(),
         });
-        applied += 1;
       }
       return applied;
     });
+  }
+
+  private async applyOperation(
+    operation: JournalOperation,
+    payload: unknown,
+  ): Promise<void> {
+    if (operation.entityType === "card") {
+      const card = payload as PersistedCard;
+      const local = await this.database.cards.get(card.id);
+      if (remoteEntityWins(card, local)) await this.database.cards.put(card);
+    } else if (operation.entityType === "deck") {
+      const deck = payload as PersistedDeck;
+      const local = await this.database.decks.get(deck.id);
+      if (remoteEntityWins(deck, local)) await this.database.decks.put(deck);
+    } else if (operation.entityType === "tag") {
+      const tag = payload as Tag;
+      const local = await this.database.tags.get(tag.id);
+      if (remoteEntityWins(tag, local)) await this.database.tags.put(tag);
+    } else if (operation.entityType === "folder") {
+      const folder = payload as Folder;
+      const local = await this.database.folders.get(folder.id);
+      if (remoteEntityWins(folder, local))
+        await this.database.folders.put(folder);
+    } else {
+      const review = payload as ReviewEvent;
+      if (!(await this.database.reviews.get(review.id))) {
+        await this.database.reviews.add(review);
+      }
+    }
   }
 }

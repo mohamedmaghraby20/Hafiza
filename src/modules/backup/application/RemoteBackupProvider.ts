@@ -5,5 +5,6 @@ export interface RemoteBackupProvider {
 
 export interface AccessTokenProvider {
   request(): Promise<string>;
+  current(): string | null;
   revoke(): void;
 }

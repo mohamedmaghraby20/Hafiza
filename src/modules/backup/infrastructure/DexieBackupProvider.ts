@@ -22,6 +22,9 @@ const backupSchema = z.object({
     syncOperations: z.array(z.looseObject({ id: z.string() })),
     devices: z.array(z.looseObject({ id: z.string() })),
     appliedSyncOperations: z.array(z.looseObject({ id: z.string() })),
+    syncCursors: z
+      .array(z.looseObject({ deviceId: z.string(), lastSequence: z.number() }))
+      .default([]),
   }),
 });
 
@@ -35,6 +38,7 @@ const dateKeys = new Set([
   "completedAt",
   "revealedAt",
   "occurredAt",
+  "appliedAt",
 ]);
 
 function reviveDates(value: unknown, key = ""): unknown {
@@ -69,6 +73,7 @@ export class DexieBackupProvider implements BackupProvider {
       syncOperations,
       devices,
       appliedSyncOperations,
+      syncCursors,
     ] = await Promise.all([
       this.database.decks.toArray(),
       this.database.cards.toArray(),
@@ -82,6 +87,7 @@ export class DexieBackupProvider implements BackupProvider {
       this.database.syncOperations.toArray(),
       this.database.devices.toArray(),
       this.database.appliedSyncOperations.toArray(),
+      this.database.syncCursors.toArray(),
     ]);
     return {
       format: "hafiza",
@@ -101,6 +107,7 @@ export class DexieBackupProvider implements BackupProvider {
         syncOperations,
         devices,
         appliedSyncOperations,
+        syncCursors,
       },
     };
   }
@@ -125,6 +132,7 @@ export class DexieBackupProvider implements BackupProvider {
         this.database.dailyStats.clear(),
         this.database.syncOperations.clear(),
         this.database.appliedSyncOperations.clear(),
+        this.database.syncCursors.clear(),
       ]);
       await Promise.all([
         this.database.decks.bulkPut([...backup.data.decks]),
@@ -140,6 +148,7 @@ export class DexieBackupProvider implements BackupProvider {
         this.database.appliedSyncOperations.bulkPut([
           ...backup.data.appliedSyncOperations,
         ]),
+        this.database.syncCursors.bulkPut([...backup.data.syncCursors]),
       ]);
     });
   }

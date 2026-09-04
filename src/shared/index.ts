@@ -17,3 +17,4 @@ export {
   type ValidationIssue,
 } from "./errors/AppError";
 export { entityIdSchema, trimmedStringSchema, validate } from "./validation";
+export { measureOperation } from "./performance";

@@ -141,6 +141,10 @@ export class GoogleOAuthTokenProvider implements AccessTokenProvider {
     });
   }
 
+  current(): string | null {
+    return this.token;
+  }
+
   revoke(): void {
     if (!this.token || !window.google) return;
     window.google.accounts.oauth2.revoke(this.token, () => undefined);

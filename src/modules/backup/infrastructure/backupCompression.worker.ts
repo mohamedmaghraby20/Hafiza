@@ -28,6 +28,16 @@ self.addEventListener(
       event.data.kind === "compress"
         ? compress(event.data.text)
         : decompress(event.data.buffer);
-    void task.then((value) => self.postMessage({ value }));
+    void task.then(
+      (value) => self.postMessage({ ok: true, value }),
+      (error: unknown) =>
+        self.postMessage({
+          ok: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Backup processing failed.",
+        }),
+    );
   },
 );

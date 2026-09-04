@@ -10,14 +10,22 @@ self.addEventListener(
     >,
   ) => {
     const data = event.data;
-    if (data.kind === "csv") {
-      self.postMessage(
-        new CsvImportAdapter().parse(data.fileName, data.content),
-      );
-      return;
-    }
-    void new XlsxImportAdapter()
-      .parse(data.fileName, data.content)
-      .then((preview) => self.postMessage(preview));
+    void (async () => {
+      try {
+        const value =
+          data.kind === "csv"
+            ? new CsvImportAdapter().parse(data.fileName, data.content)
+            : await new XlsxImportAdapter().parse(data.fileName, data.content);
+        self.postMessage({ ok: true, value });
+      } catch (error: unknown) {
+        self.postMessage({
+          ok: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : "The file could not be parsed.",
+        });
+      }
+    })();
   },
 );

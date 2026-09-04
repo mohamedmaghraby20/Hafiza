@@ -77,6 +77,11 @@ metadata in one local transaction. The next card never waits for the network.
 See [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md), [RULES.md](RULES.md), and
 [TASKS.md](TASKS.md) for the detailed design and roadmap.
 
+See [PERFORMANCE.md](PERFORMANCE.md) for the measured paths, budgets, and
+browser profiling workflow. Accessibility behavior and manual checks are in
+[ACCESSIBILITY.md](ACCESSIBILITY.md); the production handoff is in
+[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+
 ## Imports
 
 CSV and XLSX files require `Question`/`Answer` or `Front`/`Back` headers. A
@@ -111,8 +116,9 @@ unconfigured or offline.
 ## Testing and data safety
 
 Vitest covers domain behavior, repositories, migrations, imports, backup, and
-sync. Playwright covers the create → study → progress journey and offline reopen.
-Persistent schema changes must add a new Dexie version and migration test.
+sync. Playwright covers create → study → progress, keyboard study, offline
+reopen, import, transactional export/restore, and the mobile shell. Persistent
+schema changes must add a new Dexie version and migration test.
 
 ## Browser support
 

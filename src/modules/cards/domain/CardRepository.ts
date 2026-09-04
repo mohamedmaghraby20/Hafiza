@@ -18,5 +18,7 @@ export interface CardRepository {
     deckId?: EntityId,
     limit?: number,
   ): Promise<readonly Card[]>;
+  countByDeck(deckId: EntityId): Promise<number>;
+  countDue(dueBefore: Date, deckId?: EntityId): Promise<number>;
   search(query: CardSearchQuery): Promise<Page<Card>>;
 }

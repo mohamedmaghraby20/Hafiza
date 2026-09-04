@@ -2,9 +2,13 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
+import { ChevronDown } from "lucide-react";
+
+import { measureOperation } from "@shared/index";
 
 export interface LibraryDeck {
   readonly id: string;
@@ -54,6 +58,11 @@ export interface CsvPreviewData {
     readonly message: string;
   }[];
 }
+export interface SyncStatusData {
+  readonly phase: "idle" | "syncing" | "synced" | "error";
+  readonly message: string;
+  readonly lastSyncedAt: Date | null;
+}
 export interface HafizaAppPort {
   loadLibrary(): Promise<readonly LibraryDeck[]>;
   loadCards(deckId: string, search?: string): Promise<readonly LibraryCard[]>;
@@ -87,6 +96,11 @@ export interface HafizaAppPort {
   backupToDrive(): Promise<void>;
   restoreFromDrive(): Promise<void>;
   syncNow(): Promise<{ readonly pushed: number; readonly pulled: number }>;
+  syncIfConnected(): Promise<{
+    readonly pushed: number;
+    readonly pulled: number;
+  } | null>;
+  subscribeSyncStatus(listener: (status: SyncStatusData) => void): () => void;
   disconnectDrive(): void;
 }
 type View =
@@ -126,61 +140,137 @@ function formText(form: FormData, key: string) {
   const value = form.get(key);
   return typeof value === "string" ? value : "";
 }
+function failureMessage(error: unknown, fallback: string): string {
+  if (
+    error instanceof DOMException &&
+    ["QuotaExceededError", "NS_ERROR_DOM_QUOTA_REACHED"].includes(error.name)
+  ) {
+    return "This device is out of storage. Export a backup, then free browser storage before trying again.";
+  }
+  return error instanceof Error ? error.message : fallback;
+}
 function Button({
   children,
-  secondary = false,
+  variant = "primary",
+  className = "",
   ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { secondary?: boolean }) {
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?:
+    "primary" | "secondary" | "ghost" | "danger" | "inverted" | "onDark";
+}) {
+  const styles = {
+    primary: "bg-primary text-white shadow-sm hover:bg-primary-dark",
+    secondary: "border border-line bg-white text-ink hover:border-primary/30",
+    ghost: "bg-transparent text-ink hover:bg-soft",
+    danger: "bg-[#fae3de] text-red-800 hover:bg-[#f6d2ca]",
+    inverted: "bg-white text-primary shadow-sm hover:bg-white/90",
+    onDark:
+      "border border-white/25 bg-transparent text-white hover:bg-white/10",
+  };
   return (
     <button
       {...props}
-      className={`${secondary ? "border border-line bg-white text-ink" : "bg-primary text-white"} h-11 rounded-[10px] px-6 text-sm font-semibold transition hover:-translate-y-px disabled:opacity-50`}
+      className={`${styles[variant]} min-h-11 rounded-[10px] px-5 text-sm font-semibold transition hover:-translate-y-px disabled:opacity-50 ${className}`}
     >
       {children}
     </button>
   );
 }
+function SelectField({
+  children,
+  className = "",
+  ...props
+}: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <span className="relative block min-w-0">
+      <select
+        {...props}
+        className={`field peer appearance-none pr-11 ${className}`}
+      >
+        {children}
+      </select>
+      <ChevronDown
+        aria-hidden="true"
+        strokeWidth={2}
+        className="pointer-events-none absolute right-3.5 top-1/2 size-4 -translate-y-1/2 text-muted transition peer-focus:text-primary peer-disabled:opacity-40"
+      />
+    </span>
+  );
+}
 function Sidebar({
   view,
   setView,
+  syncStatus,
 }: {
   view: View;
   setView: (view: View) => void;
+  syncStatus: SyncStatusData;
 }) {
-  const item = (target: View, label: string) => (
-    <button
-      type="button"
-      onClick={() => setView(target)}
-      className={`h-10 w-full rounded-[10px] px-4 text-left text-sm ${view === target || (target === "library" && ["deck", "create", "edit", "import"].includes(view)) || (target === "today" && view === "study") ? "bg-soft font-semibold" : "hover:bg-white/70"}`}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <aside className="fixed inset-y-0 left-0 z-20 flex w-[220px] flex-col border-r border-line bg-panel px-4 py-[30px] max-md:inset-x-0 max-md:bottom-auto max-md:h-16 max-md:w-full max-md:flex-row max-md:items-center max-md:py-2">
+  const item = (target: View, label: string, shortLabel: string) => {
+    const active =
+      view === target ||
+      (target === "library" && ["deck", "edit", "import"].includes(view)) ||
+      (target === "create" && view === "create") ||
+      (target === "today" && view === "study");
+    return (
       <button
-        className="mb-9 px-3 text-left text-lg font-semibold tracking-[1.2px] text-primary max-md:mb-0"
+        type="button"
+        onClick={() => setView(target)}
+        aria-label={label}
+        aria-current={active ? "page" : undefined}
+        className={`group flex min-h-11 flex-1 flex-col items-center justify-center gap-1 rounded-xl px-1 text-sm transition md:w-full md:flex-none md:flex-row md:gap-3 md:px-3 lg:justify-start lg:px-4 ${active ? "bg-soft font-semibold text-primary" : "text-muted hover:bg-white hover:text-ink"}`}
+      >
+        <span
+          aria-hidden="true"
+          className={`grid size-7 place-items-center rounded-lg text-[11px] font-bold ${active ? "bg-primary text-white" : "bg-white text-muted group-hover:bg-soft"}`}
+        >
+          {shortLabel}
+        </span>
+        <span className="hidden lg:inline">{label}</span>
+        <span className="text-[10px] md:hidden">{label}</span>
+      </button>
+    );
+  };
+  return (
+    <aside className="fixed inset-x-0 bottom-0 z-40 flex h-[72px] border-t border-line bg-panel/95 px-2 backdrop-blur md:inset-y-0 md:right-auto md:h-auto md:w-[88px] md:flex-col md:border-r md:border-t-0 md:px-3 md:py-8 lg:w-[248px] lg:px-5">
+      <button
+        aria-label="Hafiza home"
+        className="mb-10 hidden items-center justify-center gap-3 px-1 text-left md:flex lg:justify-start lg:px-3"
         onClick={() => setView("today")}
       >
-        HAFIZA
+        <span className="grid size-10 place-items-center rounded-xl bg-primary text-base font-bold text-white shadow-card">
+          H
+        </span>
+        <span className="hidden lg:block">
+          <strong className="block text-[17px] tracking-[1.4px] text-primary">
+            HAFIZA
+          </strong>
+          <small className="text-[10px] font-medium text-muted">
+            Learn with intention
+          </small>
+        </span>
       </button>
       <nav
-        className="grid gap-2 max-md:ml-auto max-md:flex"
+        className="flex w-full items-center gap-1 md:grid md:gap-2"
         aria-label="Primary navigation"
       >
-        {item("today", "Today")}
-        {item("library", "Library")}
-        {item("progress", "Progress")}
-        <span className="hidden max-md:block">
-          {item("settings", "Settings")}
-        </span>
+        {item("today", "Today", "T")}
+        {item("library", "Library", "L")}
+        {item("create", "Create", "+")}
+        {item("progress", "Progress", "P")}
+        {item("settings", "Settings", "S")}
       </nav>
-      <button
-        onClick={() => setView("settings")}
-        className="mt-auto px-4 text-left text-sm text-muted max-md:hidden"
-      >
-        Settings
-      </button>
+      <div className="mt-auto hidden rounded-xl border border-line bg-white/75 p-4 lg:block">
+        <div className="flex items-center gap-2 text-xs font-medium">
+          <span
+            className={`size-2 rounded-full ${syncStatus.phase === "error" ? "bg-red-500" : syncStatus.phase === "syncing" ? "animate-pulse bg-amber-500" : "bg-emerald-500"}`}
+          />
+          <span className="truncate">{syncStatus.message}</span>
+        </div>
+        <p className="mt-2 text-[10px] leading-relaxed text-muted">
+          Your learning stays available offline.
+        </p>
+      </div>
     </aside>
   );
 }
@@ -194,88 +284,254 @@ function PageHeading({
   action?: React.ReactNode | undefined;
 }) {
   return (
-    <header className="mb-10 flex items-end justify-between gap-6">
+    <header className="mb-8 flex items-end justify-between gap-5 max-sm:items-start max-sm:flex-col">
       <div>
-        <h1 className="text-[28px] font-semibold leading-tight text-title">
+        <h1 className="text-[clamp(1.65rem,3vw,2.25rem)] font-semibold leading-tight tracking-[-0.025em] text-title">
           {title}
         </h1>
-        <p className="mt-2 text-sm text-muted">{subtitle}</p>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
+          {subtitle}
+        </p>
       </div>
       {action}
     </header>
   );
 }
+function ConfirmDialog({
+  title,
+  description,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  danger = false,
+}: {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  danger?: boolean;
+}) {
+  const dialogRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCancel();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", close);
+    return () => {
+      window.removeEventListener("keydown", close);
+      previouslyFocused?.focus();
+    };
+  }, [onCancel]);
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-title/35 p-4 backdrop-blur-sm">
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        aria-describedby="confirm-description"
+        className="card w-full max-w-md p-6 shadow-float"
+      >
+        <h2 id="confirm-title" className="text-xl font-semibold">
+          {title}
+        </h2>
+        <p
+          id="confirm-description"
+          className="mt-3 text-sm leading-6 text-muted"
+        >
+          {description}
+        </p>
+        <div className="mt-7 flex justify-end gap-3">
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button
+            variant={danger ? "danger" : "primary"}
+            onClick={onConfirm}
+            autoFocus
+          >
+            {confirmLabel}
+          </Button>
+        </div>
+      </section>
+    </div>
+  );
+}
 function Today({
   decks,
   dueCount,
+  progress,
   setView,
+  onSelectDeck,
   onStartStudy,
 }: {
   decks: readonly LibraryDeck[];
   dueCount: number;
+  progress: ProgressData | null;
   setView: (view: View) => void;
+  onSelectDeck: (deckId: string) => void;
   onStartStudy: () => void;
 }) {
-  const shown = decks.slice(0, 2);
+  const shown = decks.slice(0, 3);
+  const estimate = Math.max(1, Math.ceil(dueCount * 0.6));
+  const reviewedToday = progress?.days.at(-1)?.reviewedCards ?? 0;
+  const dailyGoal = 20;
+  const goalProgress = Math.min(
+    100,
+    Math.round((reviewedToday / dailyGoal) * 100),
+  );
   return (
     <>
       <PageHeading
         title="Good morning."
-        subtitle="Here’s what needs your attention today."
+        subtitle="A focused review now protects what you have already learned."
       />
-      <div className="grid grid-cols-[minmax(0,680px)_240px] gap-11 max-lg:grid-cols-1">
-        <div>
-          <section className="card h-[210px] p-7 shadow-card">
-            <p className="eyebrow">TODAY’S LEARNING</p>
-            <h2 className="mt-3 text-[30px] font-semibold">
-              {dueCount} cards due
+      <section className="card home-hero relative overflow-hidden p-7 text-white shadow-float sm:p-9">
+        <div className="absolute -right-20 -top-24 size-72 rounded-full bg-white/10" />
+        <div className="relative grid items-center gap-8 md:grid-cols-[1fr_auto]">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-white/70">
+              TODAY’S LEARNING
+            </p>
+            <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
+              {dueCount === 0
+                ? "You’re caught up"
+                : `${dueCount} cards are ready`}
             </h2>
-            <p className="mt-1 text-sm text-muted">About 18 minutes</p>
-            <div className="mt-6">
-              <Button onClick={onStartStudy}>Start review</Button>
+            <p className="mt-3 max-w-xl text-sm leading-6 text-white/75">
+              {dueCount === 0
+                ? "Create new cards or revisit a deck while your queue is clear."
+                : `Finish today’s queue in about ${estimate} minutes. Every answer is saved on this device first.`}
+            </p>
+            <div className="mt-7 flex flex-wrap gap-3">
+              <Button onClick={onStartStudy} variant="inverted">
+                Start review
+              </Button>
+              <Button variant="onDark" onClick={() => setView("create")}>
+                Add cards
+              </Button>
             </div>
-          </section>
-          <h2 className="mb-5 mt-9 text-lg font-semibold">Continue learning</h2>
-          <div className="grid grid-cols-2 gap-6 max-sm:grid-cols-1">
-            {shown.map((deck) => (
-              <button
-                key={deck.id}
-                onClick={() => setView("deck")}
-                className="card h-[132px] p-5 text-left"
-              >
-                <strong>{deck.name}</strong>
-                <span className="mt-3 block text-[13px] text-muted">
-                  {deck.dueCount || 12} due • 72% learned
-                </span>
-                <span className="mt-7 block h-2 overflow-hidden rounded bg-soft">
-                  <span className="block h-full w-[72%] bg-primary" />
-                </span>
-              </button>
-            ))}
-            {shown.length === 0 && (
-              <p className="text-sm text-muted">
-                Create a deck and add cards to begin learning.
-              </p>
-            )}
+          </div>
+          <div
+            className="grid size-32 place-items-center rounded-full p-3"
+            style={{
+              background: `conic-gradient(#ffffff ${goalProgress}%, rgb(255 255 255 / 18%) ${goalProgress}% 100%)`,
+            }}
+            role="img"
+            aria-label={`${reviewedToday} of ${dailyGoal} daily goal cards reviewed`}
+          >
+            <div className="grid size-full place-items-center rounded-full bg-primary text-center">
+              <span>
+                <strong className="block text-2xl">{reviewedToday}</strong>
+                <small className="text-[10px] text-white/70">
+                  of {dailyGoal}
+                </small>
+              </span>
+            </div>
           </div>
         </div>
-        <aside>
-          <h2 className="mb-4 font-semibold">Quick actions</h2>
-          <div className="card grid p-1">
-            <button
-              onClick={() => setView("create")}
-              className="p-4 text-left text-sm font-medium"
-            >
-              + &nbsp;Create cards
-            </button>
-            <button
-              onClick={() => setView("import")}
-              className="p-4 text-left text-sm font-medium"
-            >
-              ↑ &nbsp;Import deck
-            </button>
+      </section>
+
+      <div className="mt-6 grid grid-cols-3 gap-4 max-sm:grid-cols-1">
+        {[
+          [String(dueCount), "Due today", "Review queue"],
+          [String(decks.length), "Active decks", "In your library"],
+          [
+            `${progress?.retentionPercent ?? 0}%`,
+            "Retention",
+            "Recent answers",
+          ],
+        ].map(([value, label, detail]) => (
+          <div className="card p-5" key={label}>
+            <strong className="text-2xl tracking-tight text-title">
+              {value}
+            </strong>
+            <p className="mt-1 text-sm font-medium">{label}</p>
+            <small className="text-xs text-muted">{detail}</small>
           </div>
-        </aside>
+        ))}
+      </div>
+
+      <div className="mb-5 mt-10 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Continue learning</h2>
+          <p className="mt-1 text-xs text-muted">
+            Your most recent local decks
+          </p>
+        </div>
+        <button
+          onClick={() => setView("library")}
+          className="text-sm font-semibold text-primary"
+        >
+          View library →
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-5 max-xl:grid-cols-2 max-sm:grid-cols-1">
+        {shown.map((deck, index) => {
+          const dueShare = Math.min(
+            100,
+            Math.round((deck.dueCount / Math.max(1, deck.cardCount)) * 100),
+          );
+          const colors = ["bg-soft", "bg-[#e3f2e8]", "bg-[#f7edd4]"];
+          return (
+            <button
+              key={deck.id}
+              onClick={() => onSelectDeck(deck.id)}
+              className="card surface-hover min-h-[170px] p-5 text-left"
+            >
+              <span
+                className={`grid size-10 place-items-center rounded-xl text-sm font-bold text-primary ${colors[index % colors.length]}`}
+              >
+                {deck.name.slice(0, 1).toLocaleUpperCase()}
+              </span>
+              <strong className="mt-5 block text-base">{deck.name}</strong>
+              <span className="mt-1 block text-xs text-muted">
+                {deck.cardCount} cards • {deck.dueCount} due
+              </span>
+              <span className="mt-5 block h-1.5 overflow-hidden rounded-full bg-soft">
+                <span
+                  className="block h-full rounded-full bg-primary"
+                  style={{ width: `${dueShare}%` }}
+                />
+              </span>
+            </button>
+          );
+        })}
+        {shown.length === 0 && (
+          <div className="card col-span-full p-8 text-center">
+            <strong className="text-lg">Build your first learning deck</strong>
+            <p className="mx-auto mt-2 max-w-md text-sm text-muted">
+              Add a topic, write a few cards, and Hafiza will schedule the rest.
+            </p>
+            <Button className="mt-5" onClick={() => setView("library")}>
+              Create a deck
+            </Button>
+          </div>
+        )}
       </div>
     </>
   );
@@ -296,25 +552,36 @@ function Library({
   onSelectDeck: (deckId: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  const shown = decks.filter((deck) =>
-    deck.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
+  const [folderId, setFolderId] = useState<string | null>(null);
+  const [sort, setSort] = useState<"name" | "due" | "cards">("name");
+  const [layout, setLayout] = useState<"grid" | "list">("grid");
+  const shown = [...decks]
+    .filter(
+      (deck) =>
+        (!folderId || deck.folderId === folderId) &&
+        deck.name
+          .toLocaleLowerCase()
+          .includes(query.trim().toLocaleLowerCase()),
+    )
+    .sort((left, right) =>
+      sort === "due"
+        ? right.dueCount - left.dueCount
+        : sort === "cards"
+          ? right.cardCount - left.cardCount
+          : left.name.localeCompare(right.name),
+    );
   return (
     <>
       <PageHeading
         title="Library"
-        subtitle="Organize and find your learning material."
+        subtitle={`${decks.length} decks organized for focused, offline learning.`}
         action={<Button onClick={() => setView("create")}>+ Create</Button>}
       />
-      <div className="mb-9 grid grid-cols-[minmax(0,560px)_auto] gap-4 max-sm:grid-cols-1">
-        <input
-          className="field"
-          placeholder="Search decks, cards, or tags…"
-          aria-label="Search library"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <form onSubmit={onAddDeck} className="flex gap-2">
+      <section className="card mb-8 p-4 shadow-card sm:p-5">
+        <form
+          onSubmit={onAddDeck}
+          className="grid items-end gap-3 md:grid-cols-[minmax(180px,1fr)_minmax(150px,220px)_auto]"
+        >
           <label className="sr-only" htmlFor="deck-name">
             New deck
           </label>
@@ -325,30 +592,40 @@ function Library({
             placeholder="New deck"
             required
           />
-          <select name="folderId" aria-label="Deck folder" className="field">
+          <SelectField name="folderId" aria-label="Deck folder">
             <option value="">No folder</option>
             {folders.map((folder) => (
               <option key={folder.id} value={folder.id}>
                 {folder.name}
               </option>
             ))}
-          </select>
+          </SelectField>
           <Button type="submit">Add</Button>
         </form>
-      </div>
-      <h2 className="mb-4 font-semibold">Folders</h2>
-      <div className="mb-8 flex gap-6 overflow-x-auto">
+      </section>
+
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <button
+          onClick={() => setFolderId(null)}
+          aria-pressed={folderId === null}
+          className={`min-h-10 rounded-full px-4 text-xs font-semibold ${folderId === null ? "bg-primary text-white" : "border border-line bg-white"}`}
+        >
+          All decks
+        </button>
         {folders.map((folder) => (
-          <div className="card min-w-[196px] p-4" key={folder.id}>
-            <strong className="text-sm font-medium">{folder.name}</strong>
-            <small className="mt-2 block text-muted">
-              {decks.filter((deck) => deck.folderId === folder.id).length} decks
-            </small>
-          </div>
+          <button
+            className={`min-h-10 rounded-full px-4 text-xs font-semibold ${folderId === folder.id ? "bg-primary text-white" : "border border-line bg-white"}`}
+            key={folder.id}
+            onClick={() => setFolderId(folder.id)}
+            aria-pressed={folderId === folder.id}
+          >
+            {folder.name} ·{" "}
+            {decks.filter((deck) => deck.folderId === folder.id).length}
+          </button>
         ))}
         <form
           onSubmit={onAddFolder}
-          className="card flex min-w-[250px] gap-2 p-3"
+          className="flex min-w-[240px] flex-1 gap-2 sm:max-w-[320px]"
         >
           <label className="sr-only" htmlFor="folder-name">
             New folder
@@ -360,29 +637,122 @@ function Library({
             placeholder="New folder"
             required
           />
-          <Button type="submit">Add</Button>
+          <Button type="submit" variant="secondary">
+            Add
+          </Button>
         </form>
       </div>
-      <h2 className="mb-5 text-lg font-semibold">Your decks</h2>
-      <div className="grid gap-5">
-        {shown.map((deck) => (
+
+      <div className="mb-6 grid gap-3 lg:grid-cols-[1fr_auto_auto]">
+        <input
+          className="field"
+          placeholder="Search decks…"
+          aria-label="Search library"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <SelectField
+          className="min-w-40"
+          aria-label="Sort decks"
+          value={sort}
+          onChange={(event) =>
+            setSort(event.target.value as "name" | "due" | "cards")
+          }
+        >
+          <option value="name">Sort: Name</option>
+          <option value="due">Sort: Most due</option>
+          <option value="cards">Sort: Most cards</option>
+        </SelectField>
+        <div className="flex rounded-xl border border-line bg-white p-1">
           <button
             type="button"
-            key={deck.id}
-            onClick={() => onSelectDeck(deck.id)}
-            className="card flex h-[86px] items-center justify-between px-[18px] text-left"
+            aria-label="Grid view"
+            aria-pressed={layout === "grid"}
+            onClick={() => setLayout("grid")}
+            className={`min-h-9 rounded-lg px-3 text-xs ${layout === "grid" ? "bg-soft font-semibold text-primary" : "text-muted"}`}
           >
-            <span>
-              <strong className="block text-[15px]">{deck.name}</strong>
-              <small className="mt-2 block text-muted">
-                {deck.cardCount} cards
-              </small>
-            </span>
-            <span className="mr-24 text-[13px] font-medium max-sm:mr-0">
-              {deck.dueCount} due
-            </span>
+            Grid
           </button>
-        ))}
+          <button
+            type="button"
+            aria-label="List view"
+            aria-pressed={layout === "list"}
+            onClick={() => setLayout("list")}
+            className={`min-h-9 rounded-lg px-3 text-xs ${layout === "list" ? "bg-soft font-semibold text-primary" : "text-muted"}`}
+          >
+            List
+          </button>
+        </div>
+      </div>
+
+      <div
+        className={
+          layout === "grid"
+            ? "grid grid-cols-3 gap-5 max-xl:grid-cols-2 max-sm:grid-cols-1"
+            : "grid gap-3"
+        }
+      >
+        {shown.map((deck, index) => {
+          const colors = [
+            "bg-soft",
+            "bg-[#e3f2e8]",
+            "bg-[#f7edd4]",
+            "bg-[#e5edfa]",
+          ];
+          const dueShare = Math.min(
+            100,
+            Math.round((deck.dueCount / Math.max(1, deck.cardCount)) * 100),
+          );
+          return (
+            <button
+              type="button"
+              key={deck.id}
+              onClick={() => onSelectDeck(deck.id)}
+              className={`card surface-hover text-left ${layout === "grid" ? "min-h-[196px] p-5" : "flex min-h-[78px] items-center gap-4 px-5 py-3"}`}
+            >
+              <span
+                className={`grid size-11 shrink-0 place-items-center rounded-xl text-sm font-bold text-primary ${colors[index % colors.length]}`}
+              >
+                {deck.name.slice(0, 1).toLocaleUpperCase()}
+              </span>
+              <span className="min-w-0 flex-1">
+                <strong className="block truncate text-[15px]">
+                  {deck.name}
+                </strong>
+                <small className="mt-1 block text-muted">
+                  {deck.cardCount} cards · {deck.dueCount} due
+                </small>
+                {layout === "grid" && (
+                  <span className="mt-8 block">
+                    <span className="flex justify-between text-[10px] text-muted">
+                      <span>Review workload</span>
+                      <span>{dueShare}%</span>
+                    </span>
+                    <span className="mt-2 block h-1.5 overflow-hidden rounded-full bg-soft">
+                      <span
+                        className="block h-full rounded-full bg-primary"
+                        style={{ width: `${dueShare}%` }}
+                      />
+                    </span>
+                  </span>
+                )}
+              </span>
+              {layout === "list" && (
+                <span aria-hidden="true" className="text-primary">
+                  →
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {shown.length === 0 && (
+          <div className="card col-span-full p-10 text-center">
+            <strong>No decks match this view</strong>
+            <p className="mt-2 text-sm text-muted">
+              Clear your search or choose another folder.
+            </p>
+          </div>
+        )}
       </div>
     </>
   );
@@ -407,68 +777,122 @@ function Deck({
   onDeleteCard: (card: LibraryCard) => void;
 }) {
   const current = deck ?? samples[0]!;
+  const [filter, setFilter] = useState<"all" | "due" | "learning" | "review">(
+    "all",
+  );
+  const filteredCards = cards.filter((card) => {
+    if (filter === "all") return true;
+    if (filter === "due") return card.dueAt <= new Date();
+    return card.phase === filter;
+  });
+  const learning = cards.filter((card) =>
+    ["learning", "relearning"].includes(card.phase),
+  ).length;
+  const mastered = Math.max(0, current.cardCount - current.dueCount - learning);
   return (
     <>
       <button
-        className="mb-6 text-xs text-muted"
+        className="mb-6 min-h-10 rounded-lg px-2 text-sm font-medium text-muted hover:bg-white"
         onClick={() => setView("library")}
       >
         ← Library
       </button>
       <PageHeading
         title={current.name}
-        subtitle={`${current.cardCount} cards • Updated today`}
-        action={<Button onClick={onStartStudy}>Start review</Button>}
+        subtitle={`${current.cardCount} cards in your local collection.`}
+        action={
+          <div className="flex flex-wrap gap-3">
+            <Button variant="secondary" onClick={() => setView("create")}>
+              + Add card
+            </Button>
+            <Button onClick={onStartStudy}>Start review</Button>
+          </div>
+        }
       />
-      <div className="card mb-11 grid h-[116px] grid-cols-3 p-7">
+      <div className="mb-8 grid grid-cols-3 gap-4 max-sm:grid-cols-1">
         {[
           [current.dueCount, "Due today"],
-          [18, "Learning"],
-          [306, "Mastered"],
+          [learning, "Learning"],
+          [mastered, "Mastered"],
         ].map(([n, label]) => (
-          <div key={label}>
-            <strong className="text-2xl">{n}</strong>
-            <small className="mt-1 block text-muted">{label}</small>
+          <div className="card p-5" key={label}>
+            <strong className="text-2xl tracking-tight">{n}</strong>
+            <small className="mt-1 block text-xs text-muted">{label}</small>
           </div>
         ))}
       </div>
-      <h2 className="mb-4 text-lg font-semibold">Cards</h2>
-      <input
-        className="field mb-6 max-w-[500px]"
-        placeholder={`Search within ${current.name}…`}
-        value={search}
-        onChange={(event) => onSearch(event.target.value)}
-      />
-      <div className="grid gap-5">
-        {cards.map((card) => (
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Cards</h2>
+          <p className="mt-1 text-xs text-muted">
+            Browse, search, or refine scheduling states.
+          </p>
+        </div>
+        <input
+          className="field w-full sm:max-w-[360px]"
+          aria-label={`Search within ${current.name}`}
+          placeholder={`Search within ${current.name}…`}
+          value={search}
+          onChange={(event) => onSearch(event.target.value)}
+        />
+      </div>
+      <div className="mb-5 flex gap-2 overflow-x-auto pb-1">
+        {[
+          ["all", "All"],
+          ["due", "Due"],
+          ["learning", "Learning"],
+          ["review", "Review"],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            onClick={() =>
+              setFilter(value as "all" | "due" | "learning" | "review")
+            }
+            aria-pressed={filter === value}
+            className={`min-h-10 rounded-full px-4 text-xs font-semibold ${filter === value ? "bg-primary text-white" : "border border-line bg-white"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="grid gap-3">
+        {filteredCards.map((card) => (
           <div
-            className="card flex min-h-[66px] items-center justify-between px-[18px] py-3"
+            className="card surface-hover flex min-h-[86px] items-center justify-between gap-4 px-5 py-4 max-sm:items-start"
             key={card.id}
           >
-            <span>
-              <strong className="text-sm">{card.front}</strong>
-              <small className="mt-1 block text-muted">
-                {card.phase} • due {card.dueAt.toLocaleDateString()}
+            <span className="min-w-0">
+              <strong className="block truncate text-sm">{card.front}</strong>
+              <span className="mt-1 block truncate text-xs text-muted">
+                {card.back}
+              </span>
+              <small className="mt-2 block text-[10px] font-semibold uppercase tracking-wide text-primary">
+                {card.phase} · due {card.dueAt.toLocaleDateString()}
               </small>
             </span>
-            <span className="flex gap-3">
+            <span className="flex shrink-0 gap-2">
               <button
                 onClick={() => onEditCard(card)}
-                className="text-xs text-primary"
+                className="min-h-10 rounded-lg px-3 text-xs font-semibold text-primary hover:bg-soft"
               >
                 Edit
               </button>
               <button
                 onClick={() => onDeleteCard(card)}
-                className="text-xs text-red-700"
+                className="min-h-10 rounded-lg px-3 text-xs font-semibold text-red-700 hover:bg-[#fae3de]"
               >
                 Delete
               </button>
             </span>
           </div>
         ))}
-        {cards.length === 0 && (
-          <p className="text-sm text-muted">No cards found in this deck.</p>
+        {filteredCards.length === 0 && (
+          <div className="card p-9 text-center">
+            <strong>No cards found</strong>
+            <p className="mt-2 text-sm text-muted">
+              Try another filter or add a new card to this deck.
+            </p>
+          </div>
         )}
       </div>
     </>
@@ -493,9 +917,20 @@ function CardEditor({
   }) => Promise<void>;
   setView: (view: View) => void;
 }) {
-  const [front, setFront] = useState(card?.front ?? "");
-  const [back, setBack] = useState(card?.back ?? "");
+  const initialFront = card?.front ?? "";
+  const initialBack = card?.back ?? "";
+  const [front, setFront] = useState(initialFront);
+  const [back, setBack] = useState(initialBack);
   const deckId = card?.deckId ?? selectedDeckId;
+  const dirty = front !== initialFront || back !== initialBack;
+  useEffect(() => {
+    const protectDraft = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", protectDraft);
+    return () => window.removeEventListener("beforeunload", protectDraft);
+  }, [dirty]);
   return (
     <>
       <PageHeading
@@ -507,7 +942,7 @@ function CardEditor({
         }
         action={
           card ? (
-            <Button secondary onClick={() => setView("deck")}>
+            <Button variant="secondary" onClick={() => setView("deck")}>
               Cancel
             </Button>
           ) : undefined
@@ -518,7 +953,7 @@ function CardEditor({
           <p className="mb-3 text-sm">Create with</p>
           <div className="mb-7 flex gap-4">
             <Button>Manual</Button>
-            <Button secondary onClick={() => setView("import")}>
+            <Button variant="secondary" onClick={() => setView("import")}>
               Import
             </Button>
           </div>
@@ -529,37 +964,61 @@ function CardEditor({
           event.preventDefault();
           void onSave({ front, back, deckId });
         }}
-        className="grid grid-cols-[minmax(0,600px)_310px] gap-8 max-lg:grid-cols-1"
+        className="grid grid-cols-[minmax(0,1fr)_340px] gap-6 max-xl:grid-cols-1"
       >
-        <div className="card p-6">
-          <label className="label">Question</label>
+        <div className="card p-5 shadow-card sm:p-7">
+          <div className="mb-6 flex items-center justify-between border-b border-line pb-4">
+            <div>
+              <strong className="text-sm">Basic card</strong>
+              <p className="mt-1 text-xs text-muted">
+                Prompt on the front, recall on the back.
+              </p>
+            </div>
+            <span className="rounded-full bg-soft px-3 py-1 text-[10px] font-semibold text-primary">
+              {card ? "SAVED LOCALLY" : "LOCAL DRAFT"}
+            </span>
+          </div>
+          <label className="label" htmlFor="card-front">
+            Question
+          </label>
           <textarea
+            id="card-front"
             name="front"
             value={front}
             onChange={(e) => setFront(e.target.value)}
+            maxLength={10_000}
             className="field min-h-[110px] resize-none"
             placeholder="Type the question or prompt…"
             required
           />
-          <label className="label mt-6">Answer</label>
+          <p className="mt-2 text-right text-[10px] text-muted">
+            {front.length} / 10,000
+          </p>
+          <label className="label mt-5" htmlFor="card-back">
+            Answer
+          </label>
           <textarea
+            id="card-back"
             name="back"
             value={back}
             onChange={(event) => setBack(event.target.value)}
+            maxLength={10_000}
             className="field min-h-[140px] resize-none"
             placeholder="Write the answer…"
             required
           />
+          <p className="mt-2 text-right text-[10px] text-muted">
+            {back.length} / 10,000
+          </p>
           <label className="label mt-5" htmlFor="card-deck">
             Deck
           </label>
-          <select
+          <SelectField
             id="card-deck"
             name="deckId"
             value={deckId}
             onChange={(e) => setSelectedDeckId(e.target.value)}
             disabled={card !== null}
-            className="field"
             required
           >
             {decks.length === 0 && (
@@ -570,22 +1029,29 @@ function CardEditor({
                 {deck.name}
               </option>
             ))}
-          </select>
+          </SelectField>
         </div>
-        <div>
-          <div className="card h-[300px] p-5">
+        <div className="xl:sticky xl:top-8 xl:self-start">
+          <div className="card min-h-[300px] p-6 shadow-card">
             <p className="eyebrow">PREVIEW</p>
-            <strong className="mt-7 block">
+            <strong className="mt-8 block text-lg leading-7">
               {front || "Which nerve innervates…"}
             </strong>
-            <p className="mt-7 text-sm text-muted">Answer hidden</p>
+            <hr className="my-8 border-line" />
+            <p className="text-sm leading-6 text-muted">
+              {back || "Your answer preview appears here."}
+            </p>
           </div>
           <p className="my-5 text-xs text-muted">
             {card
               ? "Changes are saved locally first."
               : "Preview before saving."}
           </p>
-          <Button type="submit" disabled={!decks.length}>
+          <Button
+            type="submit"
+            disabled={!decks.length}
+            className="w-full sm:w-auto"
+          >
             {card ? "Save changes" : "Save card"}
           </Button>
         </div>
@@ -593,8 +1059,17 @@ function CardEditor({
     </>
   );
 }
-function Progress({ data }: { data: ProgressData | null }) {
+function Progress({
+  data,
+  dueCount,
+  deckCount,
+}: {
+  data: ProgressData | null;
+  dueCount: number;
+  deckCount: number;
+}) {
   const recent = data?.days.slice(-7) ?? [];
+  const activity = data?.days.slice(-28) ?? [];
   const max = Math.max(1, ...recent.map((day) => day.reviewedCards));
   const bars = Array.from({ length: 7 }, (_, index) => {
     const day = recent[index];
@@ -603,8 +1078,11 @@ function Progress({ data }: { data: ProgressData | null }) {
   const studyMinutes = Math.round((data?.studyTimeMs ?? 0) / 60_000);
   return (
     <>
-      <PageHeading title="Progress" subtitle="Is your studying working?" />
-      <div className="mb-10 grid grid-cols-3 gap-6 max-sm:grid-cols-1">
+      <PageHeading
+        title="Progress"
+        subtitle="Understand your consistency and make the next study decision quickly."
+      />
+      <div className="mb-8 grid grid-cols-4 gap-4 max-xl:grid-cols-2 max-sm:grid-cols-1">
         {[
           [`${data?.retentionPercent ?? 0}%`, "Retention"],
           [String(data?.reviewedCards ?? 0), "Cards reviewed"],
@@ -612,40 +1090,100 @@ function Progress({ data }: { data: ProgressData | null }) {
             `${Math.floor(studyMinutes / 60)}h ${studyMinutes % 60}m`,
             "Study time",
           ],
+          [String(dueCount), "Due now"],
         ].map(([v, l]) => (
-          <div className="card h-28 p-5" key={l}>
-            <strong className="text-2xl">{v}</strong>
-            <small className="mt-2 block text-muted">{l}</small>
+          <div className="card p-5" key={l}>
+            <strong className="text-2xl tracking-tight">{v}</strong>
+            <small className="mt-2 block text-xs text-muted">{l}</small>
           </div>
         ))}
       </div>
-      <h2 className="mb-4 text-lg font-semibold">This week</h2>
-      <div className="grid grid-cols-[582px_330px] gap-8 max-xl:grid-cols-1">
-        <div className="card h-[250px] p-5">
-          <strong className="text-[13px]">Study activity</strong>
-          <div className="mt-7 flex h-40 items-end justify-around">
+      <div className="grid grid-cols-[minmax(0,1.5fr)_minmax(280px,0.8fr)] gap-6 max-xl:grid-cols-1">
+        <div className="card min-h-[310px] p-5 sm:p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <strong className="text-sm">Study activity</strong>
+              <p className="mt-1 text-xs text-muted">
+                Cards reviewed this week
+              </p>
+            </div>
+            <span className="rounded-full bg-soft px-3 py-1 text-[10px] font-semibold text-primary">
+              7 DAYS
+            </span>
+          </div>
+          <div className="mt-8 flex h-48 items-end justify-around gap-3">
             {bars.map((height, i) => (
               <div
-                className="flex h-full flex-col justify-end text-center"
+                className="flex h-full flex-1 flex-col justify-end text-center"
                 key={i}
               >
-                <span className="w-[34px] rounded bg-soft" style={{ height }} />
+                <span
+                  className="mx-auto w-full max-w-[42px] rounded-t-lg bg-primary/75"
+                  style={{ height }}
+                  title={`${recent[i]?.reviewedCards ?? 0} cards`}
+                />
                 <small className="mt-3 text-muted">{"MTWTFSS"[i]}</small>
               </div>
             ))}
           </div>
         </div>
-        <div className="card h-[250px] p-5">
-          <strong className="text-[13px]">Retention trend</strong>
-          <b className="mt-7 block text-[34px]">
-            {data?.retentionPercent ?? 0}%
-          </b>
-          <small className="text-muted">Stable over 30 days</small>
-          <p className="mt-16 text-[11px] text-muted">
-            Focus: useful feedback, not analytics overload.
+        <div className="card min-h-[310px] p-6">
+          <p className="eyebrow">NEXT BEST ACTION</p>
+          <h2 className="mt-5 text-2xl font-semibold tracking-tight">
+            {dueCount > 0
+              ? `Review ${dueCount} due cards`
+              : "Keep your queue clear"}
+          </h2>
+          <p className="mt-3 text-sm leading-6 text-muted">
+            {data && data.retentionPercent >= 80
+              ? "Your recent retention is strong. Keep sessions short and consistent."
+              : "Use honest ratings and repeat difficult cards to strengthen recall."}
           </p>
+          <div className="mt-8 rounded-xl bg-soft p-4">
+            <strong className="text-sm">{deckCount} active decks</strong>
+            <p className="mt-1 text-xs text-muted">
+              Progress is calculated from local review events only.
+            </p>
+          </div>
         </div>
       </div>
+      <section className="card mt-6 p-5 sm:p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold">Four-week consistency</h2>
+            <p className="mt-1 text-xs text-muted">
+              Darker squares represent more completed reviews.
+            </p>
+          </div>
+          <span className="text-xs text-muted">Last 28 days</span>
+        </div>
+        <div className="mt-6 grid grid-cols-14 gap-2 max-sm:grid-cols-7">
+          {Array.from({ length: 28 }, (_, index) => {
+            const day = activity[index];
+            const intensity = day
+              ? Math.min(4, Math.ceil(day.reviewedCards / Math.max(1, max / 4)))
+              : 0;
+            const color = [
+              "bg-soft",
+              "bg-[#dcd7f4]",
+              "bg-[#b8afe5]",
+              "bg-[#766bc0]",
+              "bg-primary",
+            ][intensity];
+            return (
+              <span
+                key={day?.date ?? index}
+                className={`aspect-square rounded-md ${color}`}
+                title={
+                  day
+                    ? `${day.date}: ${day.reviewedCards} reviews`
+                    : "No reviews"
+                }
+              />
+            );
+          })}
+        </div>
+      </section>
     </>
   );
 }
@@ -721,17 +1259,26 @@ function Study({
   }, [rate, reveal, revealed]);
   const complete = state !== null && state.card === null;
   if (state === null)
-    return <p className="p-10 text-muted">Preparing your local study queue…</p>;
+    return (
+      <div className="grid min-h-[70vh] place-items-center p-6">
+        <p role="status" className="animate-pulse text-sm text-muted">
+          Preparing your local study queue…
+        </p>
+      </div>
+    );
   if (complete)
     return (
-      <div className="mx-auto mt-16 max-w-[660px] text-center">
-        <div className="card min-h-[540px] p-10 shadow-card">
+      <div className="mx-auto max-w-[720px] px-4 py-12 text-center sm:py-16">
+        <div className="card min-h-[500px] p-7 shadow-float sm:p-12">
+          <div className="mx-auto grid size-16 place-items-center rounded-full bg-[#e3f2e8] text-2xl text-success">
+            ✓
+          </div>
           <p className="eyebrow">SESSION COMPLETE</p>
           <h1 className="mt-6 text-3xl font-semibold">Nice work</h1>
           <p className="mt-2 text-muted">
             You finished today’s planned review.
           </p>
-          <div className="my-14 grid grid-cols-3 gap-5 text-left">
+          <div className="my-10 grid grid-cols-3 gap-4 text-left max-sm:grid-cols-1">
             {[
               [String(state.total), "cards reviewed"],
               ["Saved", "offline"],
@@ -743,9 +1290,9 @@ function Study({
               </div>
             ))}
           </div>
-          <div className="flex gap-4">
+          <div className="flex justify-center gap-4 max-sm:flex-col">
             <Button onClick={() => setView("today")}>Done</Button>
-            <Button secondary onClick={() => setView("progress")}>
+            <Button variant="secondary" onClick={() => setView("progress")}>
               View progress
             </Button>
           </div>
@@ -753,14 +1300,26 @@ function Study({
       </div>
     );
   return (
-    <div className="min-h-screen p-[42px] max-md:p-4">
-      <div className="flex justify-between text-sm">
-        <button onClick={() => setView("today")}>← Exit</button>
-        <span className="text-muted">
-          {state.current} / {state.total}
+    <div className="min-h-screen px-4 py-6 pb-28 sm:px-7 md:px-10 md:py-9">
+      <div className="mx-auto flex max-w-[980px] items-center justify-between text-sm">
+        <button
+          onClick={() => setView("today")}
+          className="min-h-10 rounded-lg px-3 font-medium text-muted hover:bg-white"
+        >
+          ← Exit session
+        </button>
+        <span className="rounded-full border border-line bg-white px-3 py-1.5 text-xs text-muted">
+          {Math.max(0, state.total - state.current + 1)} remaining
         </span>
       </div>
-      <div className="mt-6 h-1.5 overflow-hidden rounded bg-soft">
+      <div
+        className="mx-auto mt-5 h-1.5 max-w-[980px] overflow-hidden rounded bg-soft"
+        role="progressbar"
+        aria-label="Study session progress"
+        aria-valuemin={0}
+        aria-valuemax={state.total}
+        aria-valuenow={state.current}
+      >
         <div
           className="h-full bg-primary"
           style={{
@@ -769,11 +1328,17 @@ function Study({
         />
       </div>
       <section
-        className={`card mx-auto mt-[74px] max-w-[820px] p-9 shadow-card ${revealed ? "min-h-[470px]" : "min-h-[430px]"}`}
+        aria-live="polite"
+        className={`card mx-auto mt-8 max-w-[860px] p-6 shadow-float sm:mt-12 sm:p-10 ${revealed ? "min-h-[460px]" : "min-h-[420px]"}`}
       >
-        <p className="eyebrow">QUESTION</p>
+        <div className="flex items-center justify-between">
+          <p className="eyebrow">QUESTION</p>
+          <span className="text-xs text-muted">
+            {state.current} of {state.total}
+          </span>
+        </div>
         <h1
-          className={`${revealed ? "mt-7 text-xl" : "mx-auto mt-24 max-w-[640px] text-2xl"} font-semibold`}
+          className={`${revealed ? "mt-8 text-xl" : "mx-auto mt-20 max-w-[660px] text-2xl sm:mt-24 sm:text-3xl"} font-semibold leading-relaxed tracking-[-0.02em]`}
         >
           {state.card?.front}
         </h1>
@@ -781,14 +1346,14 @@ function Study({
           <>
             <hr className="my-7 border-line" />
             <p className="eyebrow">ANSWER</p>
-            <h2 className="ml-9 mt-7 text-2xl font-semibold">
+            <h2 className="mt-7 text-xl font-semibold leading-relaxed sm:ml-8 sm:text-2xl">
               {state.card?.back}
             </h2>
           </>
         ) : (
-          <div className="mt-28 text-center">
+          <div className="mt-24 text-center">
             <Button
-              secondary
+              variant="secondary"
               disabled={busy || state.itemId === null}
               onClick={reveal}
             >
@@ -798,9 +1363,9 @@ function Study({
         )}
       </section>
       {revealed ? (
-        <div className="mx-auto mt-7 max-w-[760px] text-center">
-          <p className="mb-5 text-sm">How well did you remember?</p>
-          <div className="grid grid-cols-4 gap-6 max-sm:grid-cols-2">
+        <div className="mx-auto mt-7 max-w-[820px] text-center">
+          <p className="mb-4 text-sm font-medium">How well did you remember?</p>
+          <div className="grid grid-cols-4 gap-3 sm:gap-5 max-sm:grid-cols-2">
             {[
               ["Again", "10 min", "bg-[#fae3de]"],
               ["Hard", "1 day", "bg-[#f7edd4]"],
@@ -814,13 +1379,16 @@ function Study({
                   const ratings = ["again", "hard", "good", "easy"] as const;
                   rate(ratings[index]!);
                 }}
-                className={`${color} h-[62px] rounded-lg px-5 py-3 text-left transition hover:-translate-y-px hover:shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-50`}
+                className={`${color} min-h-[68px] rounded-xl border border-transparent px-4 py-3 text-left transition hover:-translate-y-px hover:border-primary/20 hover:shadow-card focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-50`}
               >
                 <strong className="text-[13px]">{r}</strong>
                 <small className="mt-1 block text-[11px] text-muted">{t}</small>
               </button>
             ))}
           </div>
+          <p className="mt-4 hidden text-[10px] text-muted sm:block">
+            Keyboard shortcuts: 1 Again · 2 Hard · 3 Good · 4 Easy
+          </p>
         </div>
       ) : (
         <p className="mt-10 text-center text-xs text-muted">
@@ -849,32 +1417,70 @@ function ImportCards({
   const [deckId, setDeckId] = useState(decks[0]?.id ?? "");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   async function selectFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    setPreview(
-      file.name.toLocaleLowerCase().endsWith(".xlsx")
-        ? await application.previewXlsx(file.name, await file.arrayBuffer())
-        : await application.previewCsv(file.name, await file.text()),
-    );
+    setError("");
+    setMessage("");
+    try {
+      setPreview(
+        file.name.toLocaleLowerCase().endsWith(".xlsx")
+          ? await application.previewXlsx(file.name, await file.arrayBuffer())
+          : await application.previewCsv(file.name, await file.text()),
+      );
+    } catch (reason: unknown) {
+      setPreview(null);
+      setError(failureMessage(reason, "The selected file could not be read."));
+    }
   }
   return (
     <>
       <PageHeading
         title="Import cards"
-        subtitle="Preview your data before anything is added."
+        subtitle="Analyze files locally, review every issue, then choose what to save."
       />
-      <div className="mb-8 flex gap-8 text-xs font-semibold text-muted">
-        <span className="text-primary">1 Select file</span>
-        <span>2 Analyze</span>
-        <span>3 Preview</span>
-        <span>4 Confirm</span>
-        <span>5 Import</span>
+      <div className="mb-7 grid grid-cols-5 gap-2 rounded-xl border border-line bg-white p-2 text-center text-[10px] font-semibold text-muted max-sm:grid-cols-3">
+        <span className="rounded-lg bg-soft px-2 py-2 text-primary">
+          1 Select
+        </span>
+        <span
+          className={
+            preview ? "rounded-lg bg-soft px-2 py-2 text-primary" : "px-2 py-2"
+          }
+        >
+          2 Analyze
+        </span>
+        <span
+          className={
+            preview ? "rounded-lg bg-soft px-2 py-2 text-primary" : "px-2 py-2"
+          }
+        >
+          3 Preview
+        </span>
+        <span
+          className={
+            preview?.cards.length
+              ? "rounded-lg bg-soft px-2 py-2 text-primary"
+              : "px-2 py-2"
+          }
+        >
+          4 Confirm
+        </span>
+        <span
+          className={
+            message
+              ? "rounded-lg bg-[#e3f2e8] px-2 py-2 text-success"
+              : "px-2 py-2"
+          }
+        >
+          5 Import
+        </span>
       </div>
-      <div className="grid grid-cols-[390px_520px] gap-8 max-xl:grid-cols-1">
-        <section className="card min-h-[430px] p-6">
+      <div className="grid grid-cols-[minmax(300px,0.8fr)_minmax(0,1.2fr)] gap-6 max-xl:grid-cols-1">
+        <section className="card min-h-[430px] p-6 shadow-card">
           <label className="label" htmlFor="csv-file">
-            CSV file
+            CSV or XLSX file
           </label>
           <input
             id="csv-file"
@@ -886,9 +1492,8 @@ function ImportCards({
           <label className="label mt-6" htmlFor="import-deck">
             Destination deck
           </label>
-          <select
+          <SelectField
             id="import-deck"
-            className="field"
             value={deckId}
             onChange={(event) => setDeckId(event.target.value)}
           >
@@ -898,7 +1503,7 @@ function ImportCards({
                 {deck.name}
               </option>
             ))}
-          </select>
+          </SelectField>
           <p className="mt-8 text-sm text-muted">
             Supports CSV and XLSX. Required headers: Question/Answer or
             Front/Back. Optional: Tags.
@@ -910,7 +1515,7 @@ function ImportCards({
             </p>
           )}
         </section>
-        <section className="card min-h-[430px] p-6">
+        <section className="card min-h-[430px] p-6 shadow-card">
           <p className="eyebrow">PREVIEW</p>
           {preview?.cards[0] ? (
             <div className="mt-7">
@@ -945,6 +1550,15 @@ function ImportCards({
                     await onImported();
                     setMessage(`Imported ${count} cards locally.`);
                     setBusy(false);
+                  })
+                  .catch((reason: unknown) => {
+                    setError(
+                      failureMessage(
+                        reason,
+                        "The import could not be completed.",
+                      ),
+                    );
+                    setBusy(false);
                   });
               }}
             >
@@ -954,6 +1568,11 @@ function ImportCards({
           {message && (
             <p role="status" className="mt-4 text-sm text-primary">
               {message}
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="mt-4 text-sm text-red-700">
+              {error}
             </p>
           )}
         </section>
@@ -972,26 +1591,73 @@ function Settings({
   const [restoreText, setRestoreText] = useState<string | null>(null);
   const [summary, setSummary] = useState<string>("");
   const [driveStatus, setDriveStatus] = useState("");
+  const [error, setError] = useState("");
+  const [restoreSource, setRestoreSource] = useState<"local" | "drive" | null>(
+    null,
+  );
   async function downloadBackup() {
-    const compressed = await application.exportBackupFile();
-    const url = URL.createObjectURL(
-      new Blob([compressed], { type: "application/gzip" }),
-    );
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `hafiza-${new Date().toISOString().slice(0, 10)}.hafiza`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    setError("");
+    try {
+      const compressed = await application.exportBackupFile();
+      const url = URL.createObjectURL(
+        new Blob([compressed], { type: "application/gzip" }),
+      );
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `hafiza-${new Date().toISOString().slice(0, 10)}.hafiza`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (reason: unknown) {
+      setError(failureMessage(reason, "The backup could not be exported."));
+    }
   }
   async function inspect(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    const text = await application.decodeBackupFile(await file.arrayBuffer());
-    const info = application.inspectBackup(text);
-    setRestoreText(text);
-    setSummary(
-      `${info.deckCount} decks and ${info.cardCount} cards • ${new Date(info.exportedAt).toLocaleString()}`,
-    );
+    setError("");
+    try {
+      const text = await application.decodeBackupFile(await file.arrayBuffer());
+      const info = application.inspectBackup(text);
+      setRestoreText(text);
+      setSummary(
+        `${info.deckCount} decks and ${info.cardCount} cards • ${new Date(info.exportedAt).toLocaleString()}`,
+      );
+    } catch (reason: unknown) {
+      setRestoreText(null);
+      setSummary("");
+      setError(
+        failureMessage(
+          reason,
+          "This backup is corrupt or uses an unsupported format.",
+        ),
+      );
+    }
+  }
+  async function confirmRestore() {
+    const source = restoreSource;
+    setRestoreSource(null);
+    setError("");
+    try {
+      if (source === "local" && restoreText) {
+        await application.restoreBackup(restoreText);
+      } else if (source === "drive") {
+        setDriveStatus("Downloading…");
+        await application.restoreFromDrive();
+        setDriveStatus("Drive backup restored.");
+      } else {
+        return;
+      }
+      await onRestored();
+      setSummary("");
+      setRestoreText(null);
+    } catch (reason: unknown) {
+      setError(
+        failureMessage(
+          reason,
+          "Restore was interrupted. Your previous local data was preserved.",
+        ),
+      );
+    }
   }
   return (
     <>
@@ -999,13 +1665,15 @@ function Settings({
         title="Settings"
         subtitle="Your data stays on this device unless you export it."
       />
-      <div className="grid max-w-[760px] gap-6">
-        <section className="card p-6">
-          <h2 className="font-semibold">Local backup</h2>
-          <p className="my-3 text-sm text-muted">
-            Export a versioned .hafiza recovery file containing decks, cards,
-            review history, and settings.
-          </p>
+      <div className="grid max-w-[900px] gap-5">
+        <section className="card grid gap-5 p-6 shadow-card sm:grid-cols-[1fr_auto] sm:items-center">
+          <div>
+            <h2 className="font-semibold">Local backup</h2>
+            <p className="my-3 text-sm text-muted">
+              Export a versioned .hafiza recovery file containing decks, cards,
+              review history, and settings.
+            </p>
+          </div>
           <Button onClick={() => void downloadBackup()}>Export backup</Button>
         </section>
         <section className="card p-6">
@@ -1013,7 +1681,11 @@ function Settings({
           <p className="my-3 text-sm text-muted">
             The backup is validated and previewed before replacing local data.
           </p>
+          <label className="label" htmlFor="restore-file">
+            Choose a Hafiza backup
+          </label>
           <input
+            id="restore-file"
             type="file"
             accept=".hafiza,application/json"
             onChange={(event) => void inspect(event)}
@@ -1023,17 +1695,8 @@ function Settings({
             <div className="mt-4">
               <p className="mb-3 text-sm">{summary}</p>
               <Button
-                secondary
-                onClick={() => {
-                  if (
-                    !restoreText ||
-                    !window.confirm(
-                      "Replace local Hafiza data with this validated backup?",
-                    )
-                  )
-                    return;
-                  void application.restoreBackup(restoreText).then(onRestored);
-                }}
+                variant="secondary"
+                onClick={() => setRestoreSource("local")}
               >
                 Confirm restore
               </Button>
@@ -1055,9 +1718,7 @@ function Settings({
                   () => setDriveStatus("Backup uploaded."),
                   (error: unknown) =>
                     setDriveStatus(
-                      error instanceof Error
-                        ? error.message
-                        : "Drive backup failed.",
+                      failureMessage(error, "Drive backup failed."),
                     ),
                 );
               }}
@@ -1065,34 +1726,14 @@ function Settings({
               Backup to Drive
             </Button>
             <Button
-              secondary
+              variant="secondary"
               disabled={!application.driveEnabled()}
-              onClick={() => {
-                if (
-                  !window.confirm(
-                    "Replace local data with the latest Drive backup?",
-                  )
-                )
-                  return;
-                setDriveStatus("Downloading…");
-                void application.restoreFromDrive().then(
-                  async () => {
-                    await onRestored();
-                    setDriveStatus("Drive backup restored.");
-                  },
-                  (error: unknown) =>
-                    setDriveStatus(
-                      error instanceof Error
-                        ? error.message
-                        : "Drive restore failed.",
-                    ),
-                );
-              }}
+              onClick={() => setRestoreSource("drive")}
             >
               Restore from Drive
             </Button>
             <Button
-              secondary
+              variant="secondary"
               disabled={!application.driveEnabled()}
               onClick={() => {
                 setDriveStatus("Syncing local changes…");
@@ -1102,15 +1743,19 @@ function Settings({
                       `Sync complete: ${pushed} pushed, ${pulled} applied.`,
                     ),
                   (error: unknown) =>
-                    setDriveStatus(
-                      error instanceof Error ? error.message : "Sync failed.",
-                    ),
+                    setDriveStatus(failureMessage(error, "Sync failed.")),
                 );
               }}
             >
               Sync now
             </Button>
-            <Button secondary onClick={() => application.disconnectDrive()}>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                application.disconnectDrive();
+                setDriveStatus("Google Drive disconnected.");
+              }}
+            >
               Disconnect
             </Button>
           </div>
@@ -1125,7 +1770,22 @@ function Settings({
             </p>
           )}
         </section>
+        {error && (
+          <p role="alert" className="text-sm text-red-700">
+            {error}
+          </p>
+        )}
       </div>
+      {restoreSource && (
+        <ConfirmDialog
+          title="Replace local learning data?"
+          description="Hafiza validates the backup first and restores it in one transaction. Keep a current export before continuing."
+          confirmLabel="Restore backup"
+          danger
+          onCancel={() => setRestoreSource(null)}
+          onConfirm={() => void confirmRestore()}
+        />
+      )}
     </>
   );
 }
@@ -1137,34 +1797,56 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   const [studyState, setStudyState] = useState<StudyState | null>(null);
   const [progress, setProgress] = useState<ProgressData | null>(null);
   const [editingCard, setEditingCard] = useState<LibraryCard | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<LibraryCard | null>(
+    null,
+  );
   const [selectedDeckId, setSelectedDeckId] = useState("");
   const [status, setStatus] = useState("Loading your local library…");
+  const [syncStatus, setSyncStatus] = useState<SyncStatusData>({
+    phase: "idle",
+    message: "Local data is up to date",
+    lastSyncedAt: null,
+  });
   const [view, setView] = useState<View>("today");
   const refresh = useCallback(async () => {
-    try {
-      const [next, nextFolders] = await Promise.all([
-        application.loadLibrary(),
-        application.loadFolders(),
-      ]);
-      setDecks(next);
-      setFolders(nextFolders);
-      setSelectedDeckId((v) => v || next[0]?.id || "");
-      setStatus(
-        next.length
-          ? "Saved on this device"
-          : "Create your first deck to begin.",
-      );
-    } catch (error: unknown) {
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "The local library could not be opened.",
-      );
-    }
+    await measureOperation("hafiza.startup", async () => {
+      try {
+        const [next, nextFolders, nextProgress] = await Promise.all([
+          application.loadLibrary(),
+          application.loadFolders(),
+          application.loadProgress(),
+        ]);
+        setDecks(next);
+        setFolders(nextFolders);
+        setProgress(nextProgress);
+        setSelectedDeckId((v) => v || next[0]?.id || "");
+        setStatus(
+          next.length
+            ? "Saved on this device"
+            : "Create your first deck to begin.",
+        );
+      } catch (error: unknown) {
+        setStatus(
+          failureMessage(error, "The local library could not be opened."),
+        );
+      }
+    });
   }, [application]);
   useEffect(() => {
     queueMicrotask(() => void refresh());
   }, [refresh]);
+  useEffect(
+    () => application.subscribeSyncStatus(setSyncStatus),
+    [application],
+  );
+  useEffect(() => {
+    if (!application.driveEnabled()) return;
+    const syncOnline = () => {
+      void application.syncIfConnected().catch(() => undefined);
+    };
+    window.addEventListener("online", syncOnline);
+    return () => window.removeEventListener("online", syncOnline);
+  }, [application]);
   useEffect(() => {
     if (view !== "deck" || !selectedDeckId) return;
     let active = true;
@@ -1197,19 +1879,19 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
       el.reset();
       await refresh();
     } catch (error: unknown) {
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "The deck could not be created.",
-      );
+      setStatus(failureMessage(error, "The deck could not be created."));
     }
   }
   async function addFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const el = event.currentTarget;
-    await application.createFolder(formText(new FormData(el), "folderName"));
-    el.reset();
-    await refresh();
+    try {
+      await application.createFolder(formText(new FormData(el), "folderName"));
+      el.reset();
+      await refresh();
+    } catch (error: unknown) {
+      setStatus(failureMessage(error, "The folder could not be created."));
+    }
   }
   async function saveCard(input: {
     front: string;
@@ -1228,9 +1910,7 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
       setSelectedDeckId(input.deckId);
       setView("deck");
     } catch (error: unknown) {
-      setStatus(
-        error instanceof Error ? error.message : "The card could not be saved.",
-      );
+      setStatus(failureMessage(error, "The card could not be saved."));
     }
   }
   function selectDeck(deckId: string) {
@@ -1246,11 +1926,7 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
       setStatus("Study session saved locally");
     } catch (error: unknown) {
       setView("today");
-      setStatus(
-        error instanceof Error
-          ? error.message
-          : "The study session could not start.",
-      );
+      setStatus(failureMessage(error, "The study session could not start."));
     }
   }
   function editCard(card: LibraryCard) {
@@ -1259,31 +1935,57 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
     setView("edit");
   }
   async function deleteCard(card: LibraryCard) {
-    if (!window.confirm("Move this card to the deleted-items recovery state?"))
-      return;
-    await application.deleteCard(card.id);
-    setCards(await application.loadCards(card.deckId, cardSearch));
-    await refresh();
+    try {
+      await application.deleteCard(card.id);
+      setCards(await application.loadCards(card.deckId, cardSearch));
+      await refresh();
+      setStatus("Card moved to the recovery state.");
+    } catch (error: unknown) {
+      setStatus(failureMessage(error, "The card could not be deleted."));
+    } finally {
+      setDeleteCandidate(null);
+    }
   }
   const dueCount = useMemo(
     () => decks.reduce((sum, d) => sum + d.dueCount, 0),
     [decks],
   );
   const selected = decks.find((d) => d.id === selectedDeckId);
+  const statusIsError = /could not|out of storage|failed|unavailable/i.test(
+    status,
+  );
   return (
     <div className="min-h-screen bg-canvas text-ink">
-      <Sidebar view={view} setView={setView} />
+      <a
+        href="#main-content"
+        className="fixed left-4 top-3 z-[60] -translate-y-20 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white focus:translate-y-0"
+      >
+        Skip to content
+      </a>
+      <Sidebar view={view} setView={setView} syncStatus={syncStatus} />
       <main
-        className={`${view === "study" ? "ml-[220px] max-w-none p-0 max-md:ml-0 max-md:pt-16" : "ml-[220px] max-w-[1060px] px-12 py-[46px] max-md:ml-0 max-md:pt-24"} min-h-screen`}
+        id="main-content"
+        tabIndex={-1}
+        className={`${view === "study" ? "p-0 md:ml-[88px] lg:ml-[248px]" : "max-w-[1240px] px-4 py-7 pb-24 sm:px-7 md:ml-[88px] md:px-10 md:py-10 lg:ml-[248px] lg:px-12"} min-h-screen`}
       >
         <span role="status" className="sr-only">
           {status}
         </span>
+        {statusIsError && (
+          <div
+            role="alert"
+            className="mb-6 rounded-xl border border-red-200 bg-[#fae3de] px-4 py-3 text-sm text-red-800"
+          >
+            {status}
+          </div>
+        )}
         {view === "today" && (
           <Today
             decks={decks}
             dueCount={dueCount}
+            progress={progress}
             setView={setView}
+            onSelectDeck={selectDeck}
             onStartStudy={() => void startStudy()}
           />
         )}{" "}
@@ -1306,7 +2008,7 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
             onSearch={setCardSearch}
             onStartStudy={() => void startStudy(selectedDeckId)}
             onEditCard={editCard}
-            onDeleteCard={(card) => void deleteCard(card)}
+            onDeleteCard={setDeleteCandidate}
           />
         )}{" "}
         {(view === "create" || view === "edit") && (
@@ -1326,7 +2028,13 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
             onImported={refresh}
           />
         )}{" "}
-        {view === "progress" && <Progress data={progress} />}{" "}
+        {view === "progress" && (
+          <Progress
+            data={progress}
+            dueCount={dueCount}
+            deckCount={decks.length}
+          />
+        )}{" "}
         {view === "settings" && (
           <Settings application={application} onRestored={refresh} />
         )}{" "}
@@ -1339,6 +2047,16 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
           />
         )}
       </main>
+      {deleteCandidate && (
+        <ConfirmDialog
+          title="Move this card to recovery?"
+          description="The card will disappear from this deck but its tombstone remains available for backup and synchronization safety."
+          confirmLabel="Delete card"
+          danger
+          onCancel={() => setDeleteCandidate(null)}
+          onConfirm={() => void deleteCard(deleteCandidate)}
+        />
+      )}
     </div>
   );
 }

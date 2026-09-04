@@ -10,3 +10,8 @@ export type {
   SyncJournal,
 } from "./domain/SyncJournal";
 export { GoogleDriveJournalProvider } from "./infrastructure/GoogleDriveJournalProvider";
+export {
+  SyncOrchestrator,
+  type SyncPhase,
+  type SyncStatus,
+} from "./application/SyncOrchestrator";

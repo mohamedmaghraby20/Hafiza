@@ -6,5 +6,6 @@ export {
   type DeviceRecord,
   type PersistedCard,
   type PersistedDeck,
+  type SyncCursorRecord,
   type SyncOperation,
 } from "./HafizaDatabase";

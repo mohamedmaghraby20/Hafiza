@@ -68,6 +68,30 @@ export class DexieCardRepository implements CardRepository {
     return (await collection.limit(limit).toArray()).map(toCard);
   }
 
+  countByDeck(deckId: EntityId): Promise<number> {
+    return this.database.cards
+      .where("[deckId+active]")
+      .equals([deckId, 1])
+      .count();
+  }
+
+  countDue(dueBefore: Date, deckId?: EntityId): Promise<number> {
+    return deckId
+      ? this.database.cards
+          .where("[deckId+active+dueAt]")
+          .between(
+            [deckId, 1, Dexie.minKey],
+            [deckId, 1, dueBefore],
+            true,
+            true,
+          )
+          .count()
+      : this.database.cards
+          .where("[active+dueAt]")
+          .between([1, Dexie.minKey], [1, dueBefore], true, true)
+          .count();
+  }
+
   async search(query: CardSearchQuery): Promise<Page<Card>> {
     const text = query.text?.trim().toLocaleLowerCase();
     const collection = text

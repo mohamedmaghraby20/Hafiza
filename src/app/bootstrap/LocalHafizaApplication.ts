@@ -34,9 +34,12 @@ import {
   DexieDeviceIdentityRepository,
   GoogleDriveJournalProvider,
   IncrementalSyncService,
+  SyncOrchestrator,
+  type SyncStatus,
 } from "@modules/sync";
 import {
   SystemClock,
+  measureOperation,
   trimmedStringSchema,
   UuidV7IdGenerator,
   validate,
@@ -127,6 +130,7 @@ export class LocalHafizaApplication implements HafizaAppPort {
     this.#database,
     new GoogleDriveJournalProvider(),
   );
+  readonly #syncOrchestrator = new SyncOrchestrator();
 
   async #deviceId(): Promise<EntityId> {
     await this.#database.open();
@@ -134,18 +138,20 @@ export class LocalHafizaApplication implements HafizaAppPort {
   }
 
   async loadLibrary(): Promise<readonly LibraryDeck[]> {
-    await this.#database.open();
-    const page = await this.#library.listDecks(
-      { offset: 0, limit: 100 },
-      this.#clock.now(),
-    );
-    return page.items.map(({ deck, cardCount, dueCount }) => ({
-      id: deck.id,
-      name: deck.name,
-      cardCount,
-      dueCount,
-      folderId: deck.folderId,
-    }));
+    return measureOperation("hafiza.library.load", async () => {
+      await this.#database.open();
+      const page = await this.#library.listDecks(
+        { offset: 0, limit: 100 },
+        this.#clock.now(),
+      );
+      return page.items.map(({ deck, cardCount, dueCount }) => ({
+        id: deck.id,
+        name: deck.name,
+        cardCount,
+        dueCount,
+        folderId: deck.folderId,
+      }));
+    });
   }
 
   async loadFolders(): Promise<readonly LibraryFolder[]> {
@@ -278,12 +284,14 @@ export class LocalHafizaApplication implements HafizaAppPort {
     itemId: string,
     rating: Rating,
   ): Promise<StudyState> {
-    await this.#study.rate({
-      sessionItemId: itemId as EntityId,
-      rating,
-      deviceId: await this.#deviceId(),
+    return measureOperation("hafiza.study.rate-to-next", async () => {
+      await this.#study.rate({
+        sessionItemId: itemId as EntityId,
+        rating,
+        deviceId: await this.#deviceId(),
+      });
+      return this.#studyState(sessionId as EntityId);
     });
-    return this.#studyState(sessionId as EntityId);
   }
 
   async #studyState(sessionId: EntityId): Promise<StudyState> {
@@ -316,42 +324,50 @@ export class LocalHafizaApplication implements HafizaAppPort {
   }
 
   async loadProgress(): Promise<ProgressData> {
-    await this.#database.open();
-    const progress = await this.#progress.execute();
-    return {
-      reviewedCards: progress.reviewedCards,
-      retentionPercent: progress.retentionPercent,
-      studyTimeMs: progress.studyTimeMs,
-      days: progress.days.map(({ date, reviewedCards }) => ({
-        date,
-        reviewedCards,
-      })),
-    };
+    return measureOperation("hafiza.progress.load", async () => {
+      await this.#database.open();
+      const progress = await this.#progress.execute();
+      return {
+        reviewedCards: progress.reviewedCards,
+        retentionPercent: progress.retentionPercent,
+        studyTimeMs: progress.studyTimeMs,
+        days: progress.days.map(({ date, reviewedCards }) => ({
+          date,
+          reviewedCards,
+        })),
+      };
+    });
   }
 
   previewCsv(fileName: string, content: string): Promise<CsvPreviewData> {
-    return this.#csv.parse(fileName, content);
+    return measureOperation("hafiza.import.parse", () =>
+      this.#csv.parse(fileName, content),
+    );
   }
 
   previewXlsx(fileName: string, content: ArrayBuffer): Promise<CsvPreviewData> {
-    return this.#csv.parseXlsx(fileName, content);
+    return measureOperation("hafiza.import.parse", () =>
+      this.#csv.parseXlsx(fileName, content),
+    );
   }
 
   async importCards(preview: CsvPreviewData, deckId: string): Promise<number> {
-    const deviceId = await this.#deviceId();
-    return this.#transactions.run(async () => {
-      const imported = await this.#import.execute(
-        preview,
-        deckId as EntityId,
-        deviceId,
-      );
-      for (const id of imported.cardIds) {
-        await this.#enqueueSync("card", id, "upsert", deviceId);
-      }
-      for (const id of imported.tagIds) {
-        await this.#enqueueSync("tag", id, "upsert", deviceId);
-      }
-      return imported.cardIds.length;
+    return measureOperation("hafiza.import.commit", async () => {
+      const deviceId = await this.#deviceId();
+      return this.#transactions.run(async () => {
+        const imported = await this.#import.execute(
+          preview,
+          deckId as EntityId,
+          deviceId,
+        );
+        for (const id of imported.cardIds) {
+          await this.#enqueueSync("card", id, "upsert", deviceId);
+        }
+        for (const id of imported.tagIds) {
+          await this.#enqueueSync("tag", id, "upsert", deviceId);
+        }
+        return imported.cardIds.length;
+      });
     });
   }
 
@@ -361,7 +377,9 @@ export class LocalHafizaApplication implements HafizaAppPort {
   }
 
   async exportBackupFile(): Promise<ArrayBuffer> {
-    return this.#backupCompression.compress(await this.exportBackup());
+    return measureOperation("hafiza.backup.export", async () =>
+      this.#backupCompression.compress(await this.exportBackup()),
+    );
   }
 
   decodeBackupFile(buffer: ArrayBuffer): Promise<string> {
@@ -401,11 +419,22 @@ export class LocalHafizaApplication implements HafizaAppPort {
   }
 
   async syncNow() {
-    const [token, deviceId] = await Promise.all([
-      this.#googleAuth.request(),
-      this.#deviceId(),
-    ]);
-    return this.#sync.sync(deviceId, token);
+    const token = await this.#googleAuth.request();
+    return this.#syncOrchestrator.run(async () =>
+      this.#sync.sync(await this.#deviceId(), token),
+    );
+  }
+
+  async syncIfConnected() {
+    const token = this.#googleAuth.current();
+    if (!token) return null;
+    return this.#syncOrchestrator.run(async () =>
+      this.#sync.sync(await this.#deviceId(), token),
+    );
+  }
+
+  subscribeSyncStatus(listener: (status: SyncStatus) => void): () => void {
+    return this.#syncOrchestrator.subscribe(listener);
   }
 
   disconnectDrive(): void {

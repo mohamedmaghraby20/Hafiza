@@ -135,30 +135,30 @@ Follow `SYSTEM_DESIGN.md`, `RULES.md`, and `AGENTS.md`.
 -   [x] **T111 SyncOperation:** ordered local operations, status/retry
     persistence/tests.
 -   [x] **T112 Enqueue changes:** cards/decks/tags/reviews/tombstones.
--   [ ] **T113 Drive journal:** per-device ordered journal, cursor
+-   [x] **T113 Drive journal:** per-device ordered journal, cursor
     metadata, compression/schema.
 -   [x] **T114 Push:** batched/idempotent upload/retry/tests.
 -   [x] **T115 Pull:** discover/download unseen operations,
     validation/cursors/tests.
--   [ ] **T116 Conflicts:** deterministic rules with comprehensive tests.
+-   [x] **T116 Conflicts:** deterministic rules with comprehensive tests.
 -   [x] **T117 Remote apply:** transactional apply; cursor advances only
     after success; rollback tests.
--   [ ] **T118 Orchestration:** manual Sync Now + online-triggered
+-   [x] **T118 Orchestration:** manual Sync Now + online-triggered
     non-blocking sync/status/retry.
 
 ## Phase 12 --- Hardening
 
 -   [x] **T120 Migration tests:** upgrade from every released schema.
--   [ ] **T121 Recovery:** quota, corrupt backup, interrupted
+-   [x] **T121 Recovery:** quota, corrupt backup, interrupted
     import/restore/sync.
--   [ ] **T122 Performance:** measure startup, Today, large Library,
+-   [x] **T122 Performance:** measure startup, Today, large Library,
     rating→next, import, backup, Progress; optimize measured
     bottlenecks.
--   [ ] **T123 Accessibility:** keyboard, focus, contrast, labels,
+-   [x] **T123 Accessibility:** keyboard, focus, contrast, labels,
     reduced motion, screen readers.
--   [ ] **T124 E2E:** create→study→progress; offline reopen; import;
+-   [x] **T124 E2E:** create→study→progress; offline reopen; import;
     export/restore; Drive backup; multi-device sync when shipped.
--   [ ] **T125 Release:** typecheck/lint/tests/build pass, PWA/offline
+-   [x] **T125 Release:** typecheck/lint/tests/build pass, PWA/offline
     verified, no known data-loss issue, backup restore verified, docs
     current.
 

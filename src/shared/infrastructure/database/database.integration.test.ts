@@ -49,6 +49,7 @@ describe("Dexie repositories", () => {
       "reviews",
       "sessionItems",
       "sessions",
+      "syncCursors",
       "syncOperations",
       "tags",
     ]);
@@ -200,6 +201,28 @@ describe("Dexie repositories", () => {
     expect(upgraded.tables.map((table) => table.name)).toContain(
       "appliedSyncOperations",
     );
+    expect(upgraded.tables.map((table) => table.name)).toContain("syncCursors");
+    await upgraded.delete();
+  });
+
+  it("upgrades the previous v3 sync schema with an empty cursor table", async () => {
+    const name = `hafiza-v3-upgrade-${testIds.next()}`;
+    const legacy = new Dexie(name);
+    legacy.version(3).stores({
+      decks: "id, active, name",
+      appliedSyncOperations: "id, appliedAt",
+    });
+    const deck = createDeckFixture();
+    await legacy.table("decks").put({ ...deck, active: 1 });
+    legacy.close();
+
+    const upgraded = new HafizaDatabase(name);
+    await upgraded.open();
+
+    expect(await upgraded.decks.get(deck.id)).toMatchObject({
+      name: deck.name,
+    });
+    expect(await upgraded.syncCursors.count()).toBe(0);
     await upgraded.delete();
   });
 });

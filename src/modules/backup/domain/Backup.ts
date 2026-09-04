@@ -4,6 +4,7 @@ import type {
   DeviceRecord,
   PersistedCard,
   PersistedDeck,
+  SyncCursorRecord,
   SyncOperation,
 } from "@shared/infrastructure/database";
 import type { CardTag, Folder, Tag } from "@modules/library";
@@ -31,6 +32,7 @@ export interface HafizaBackup {
     readonly syncOperations: readonly SyncOperation[];
     readonly devices: readonly DeviceRecord[];
     readonly appliedSyncOperations: readonly AppliedSyncOperation[];
+    readonly syncCursors: readonly SyncCursorRecord[];
   };
 }
 

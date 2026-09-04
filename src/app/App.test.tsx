@@ -63,6 +63,15 @@ function createApplication(
     backupToDrive: () => Promise.resolve(),
     restoreFromDrive: () => Promise.resolve(),
     syncNow: () => Promise.resolve({ pushed: 0, pulled: 0 }),
+    syncIfConnected: () => Promise.resolve(null),
+    subscribeSyncStatus: (listener) => {
+      listener({
+        phase: "idle",
+        message: "Local data is up to date",
+        lastSyncedAt: null,
+      });
+      return () => undefined;
+    },
     disconnectDrive: () => undefined,
     ...overrides,
   };
@@ -175,5 +184,73 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: /Easy/ })).toHaveClass(
       "bg-[#e5edfa]",
     );
+  });
+
+  it("explains how to recover when browser storage is full", async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        application={createApplication({
+          createDeck: () =>
+            Promise.reject(
+              new DOMException("Storage quota reached", "QuotaExceededError"),
+            ),
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Library" }));
+    await user.type(screen.getByLabelText("New deck"), "Large deck");
+    await user.click(screen.getAllByRole("button", { name: "Add" })[0]!);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Export a backup",
+    );
+  });
+
+  it("reports a corrupt backup instead of replacing local data", async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        application={createApplication({
+          decodeBackupFile: () => Promise.reject(new Error("Invalid gzip")),
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.upload(
+      screen.getByLabelText("Choose a Hafiza backup"),
+      new File(["broken"], "broken.hafiza", {
+        type: "application/gzip",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid gzip");
+  });
+
+  it("backs up to Drive on demand and syncs again when connectivity returns", async () => {
+    const user = userEvent.setup();
+    const backupToDrive = vi.fn(() => Promise.resolve());
+    const syncIfConnected = vi.fn(() =>
+      Promise.resolve({ pushed: 1, pulled: 2 }),
+    );
+    render(
+      <App
+        application={createApplication({
+          driveEnabled: () => true,
+          backupToDrive,
+          syncIfConnected,
+        })}
+      />,
+    );
+
+    window.dispatchEvent(new Event("online"));
+    expect(syncIfConnected).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Backup to Drive" }));
+
+    expect(backupToDrive).toHaveBeenCalledOnce();
+    expect(await screen.findByText("Backup uploaded.")).toBeVisible();
   });
 });

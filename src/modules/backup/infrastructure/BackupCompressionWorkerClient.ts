@@ -19,11 +19,21 @@ export class BackupCompressionWorkerClient {
     return new Promise((resolve, reject) => {
       worker.addEventListener(
         "message",
-        (event: MessageEvent<{ value: T }>) => {
-          resolve(event.data.value);
+        (
+          event: MessageEvent<
+            | { readonly ok: true; readonly value: T }
+            | { readonly ok: false; readonly message: string }
+          >,
+        ) => {
+          if (event.data.ok) resolve(event.data.value);
+          else reject(new Error(event.data.message));
           worker.terminate();
         },
       );
+      worker.addEventListener("messageerror", () => {
+        reject(new Error("The backup worker returned unreadable data."));
+        worker.terminate();
+      });
       worker.addEventListener("error", (event) => {
         reject(new Error(event.message || "Backup worker failed."));
         worker.terminate();

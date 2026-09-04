@@ -46,6 +46,16 @@ corepack pnpm format       # Format project files
 corepack pnpm format:check # Verify formatting
 ```
 
+## Deployment
+
+The project is configured for continuous deployment on Netlify. GitHub Actions
+validates every pull request and every push to `main`; Netlify publishes the
+static `dist` output and can create pull-request Deploy Previews.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the first-time setup, everyday Git
+workflow, Google Drive environment configuration, local Netlify validation, and
+rollback instructions.
+
 ## Architecture
 
 Hafiza is a local-first modular monolith with the dependency direction:

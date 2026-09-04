@@ -20,6 +20,8 @@ test("opens the Hafiza application", async ({ page }) => {
   await page.getByPlaceholder("Type the question or prompt…").fill("Hello");
   await page.getByPlaceholder("Write the answer…").fill("Merhaba");
   await page.getByRole("button", { name: "Save card" }).click();
+  await expect(page.getByRole("heading", { name: "Cards" })).toBeVisible();
+  await page.getByRole("button", { name: "Library" }).click();
   await expect(
     page.getByRole("button", { name: /Turkish basics/ }),
   ).toContainText("1 cards");
@@ -29,6 +31,25 @@ test("opens the Hafiza application", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Hello" })).toBeVisible();
   await page.getByRole("button", { name: "Show answer" }).click();
   await expect(page.getByRole("heading", { name: "Merhaba" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Again/ })).toHaveCSS(
+    "background-color",
+    "rgb(250, 227, 222)",
+  );
+  await expect(page.getByRole("button", { name: /Hard/ })).toHaveCSS(
+    "background-color",
+    "rgb(247, 237, 212)",
+  );
+  await expect(page.getByRole("button", { name: /Good/ })).toHaveCSS(
+    "background-color",
+    "rgb(227, 242, 232)",
+  );
+  await expect(page.getByRole("button", { name: /Easy/ })).toHaveCSS(
+    "background-color",
+    "rgb(229, 237, 250)",
+  );
+  await expect(
+    page.getByRole("navigation", { name: "Primary navigation" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: /Good/ }).click();
   await expect(page.getByRole("heading", { name: "Nice work" })).toBeVisible();
   await page.getByRole("button", { name: "View progress" }).click();

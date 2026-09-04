@@ -94,6 +94,7 @@ type View =
   | "library"
   | "deck"
   | "create"
+  | "edit"
   | "import"
   | "progress"
   | "settings"
@@ -150,7 +151,7 @@ function Sidebar({
     <button
       type="button"
       onClick={() => setView(target)}
-      className={`h-10 w-full rounded-[10px] px-4 text-left text-sm ${view === target || (target === "library" && view === "deck") ? "bg-soft font-semibold" : "hover:bg-white/70"}`}
+      className={`h-10 w-full rounded-[10px] px-4 text-left text-sm ${view === target || (target === "library" && ["deck", "create", "edit", "import"].includes(view)) || (target === "today" && view === "study") ? "bg-soft font-semibold" : "hover:bg-white/70"}`}
     >
       {label}
     </button>
@@ -190,7 +191,7 @@ function PageHeading({
 }: {
   title: string;
   subtitle: string;
-  action?: React.ReactNode;
+  action?: React.ReactNode | undefined;
 }) {
   return (
     <header className="mb-10 flex items-end justify-between gap-6">
@@ -473,35 +474,61 @@ function Deck({
     </>
   );
 }
-function CreateCard({
+function CardEditor({
   decks,
   selectedDeckId,
   setSelectedDeckId,
-  onAddCard,
+  card,
+  onSave,
   setView,
 }: {
   decks: readonly LibraryDeck[];
   selectedDeckId: string;
   setSelectedDeckId: (id: string) => void;
-  onAddCard: (event: FormEvent<HTMLFormElement>) => void;
+  card: LibraryCard | null;
+  onSave: (input: {
+    front: string;
+    back: string;
+    deckId: string;
+  }) => Promise<void>;
   setView: (view: View) => void;
 }) {
-  const [front, setFront] = useState("");
+  const [front, setFront] = useState(card?.front ?? "");
+  const [back, setBack] = useState(card?.back ?? "");
+  const deckId = card?.deckId ?? selectedDeckId;
   return (
     <>
       <PageHeading
-        title="Create cards"
-        subtitle="Turn your material into clear, reviewable knowledge."
+        title={card ? "Edit card" : "Create cards"}
+        subtitle={
+          card
+            ? "Refine this card using the same focused editor."
+            : "Turn your material into clear, reviewable knowledge."
+        }
+        action={
+          card ? (
+            <Button secondary onClick={() => setView("deck")}>
+              Cancel
+            </Button>
+          ) : undefined
+        }
       />
-      <p className="mb-3 text-sm">Create with</p>
-      <div className="mb-7 flex gap-4">
-        <Button>Manual</Button>
-        <Button secondary onClick={() => setView("import")}>
-          Import
-        </Button>
-      </div>
+      {!card && (
+        <>
+          <p className="mb-3 text-sm">Create with</p>
+          <div className="mb-7 flex gap-4">
+            <Button>Manual</Button>
+            <Button secondary onClick={() => setView("import")}>
+              Import
+            </Button>
+          </div>
+        </>
+      )}
       <form
-        onSubmit={onAddCard}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSave({ front, back, deckId });
+        }}
         className="grid grid-cols-[minmax(0,600px)_310px] gap-8 max-lg:grid-cols-1"
       >
         <div className="card p-6">
@@ -517,6 +544,8 @@ function CreateCard({
           <label className="label mt-6">Answer</label>
           <textarea
             name="back"
+            value={back}
+            onChange={(event) => setBack(event.target.value)}
             className="field min-h-[140px] resize-none"
             placeholder="Write the answer…"
             required
@@ -527,8 +556,9 @@ function CreateCard({
           <select
             id="card-deck"
             name="deckId"
-            value={selectedDeckId}
+            value={deckId}
             onChange={(e) => setSelectedDeckId(e.target.value)}
+            disabled={card !== null}
             className="field"
             required
           >
@@ -550,9 +580,13 @@ function CreateCard({
             </strong>
             <p className="mt-7 text-sm text-muted">Answer hidden</p>
           </div>
-          <p className="my-5 text-xs text-muted">Preview before saving.</p>
+          <p className="my-5 text-xs text-muted">
+            {card
+              ? "Changes are saved locally first."
+              : "Preview before saving."}
+          </p>
           <Button type="submit" disabled={!decks.length}>
-            Save card
+            {card ? "Save changes" : "Save card"}
           </Button>
         </div>
       </form>
@@ -768,11 +802,11 @@ function Study({
           <p className="mb-5 text-sm">How well did you remember?</p>
           <div className="grid grid-cols-4 gap-6 max-sm:grid-cols-2">
             {[
-              ["Again", "10 min"],
-              ["Hard", "1 day"],
-              ["Good", "4 days"],
-              ["Easy", "10 days"],
-            ].map(([r, t], index) => (
+              ["Again", "10 min", "bg-[#fae3de]"],
+              ["Hard", "1 day", "bg-[#f7edd4]"],
+              ["Good", "4 days", "bg-[#e3f2e8]"],
+              ["Easy", "10 days", "bg-[#e5edfa]"],
+            ].map(([r, t, color], index) => (
               <button
                 key={r}
                 disabled={busy}
@@ -780,10 +814,10 @@ function Study({
                   const ratings = ["again", "hard", "good", "easy"] as const;
                   rate(ratings[index]!);
                 }}
-                className="card p-3 text-left"
+                className={`${color} h-[62px] rounded-lg px-5 py-3 text-left transition hover:-translate-y-px hover:shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-50`}
               >
-                <strong className="text-sm">{r}</strong>
-                <small className="block text-muted">{t}</small>
+                <strong className="text-[13px]">{r}</strong>
+                <small className="mt-1 block text-[11px] text-muted">{t}</small>
               </button>
             ))}
           </div>
@@ -1102,6 +1136,7 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   const [cardSearch, setCardSearch] = useState("");
   const [studyState, setStudyState] = useState<StudyState | null>(null);
   const [progress, setProgress] = useState<ProgressData | null>(null);
+  const [editingCard, setEditingCard] = useState<LibraryCard | null>(null);
   const [selectedDeckId, setSelectedDeckId] = useState("");
   const [status, setStatus] = useState("Loading your local library…");
   const [view, setView] = useState<View>("today");
@@ -1176,24 +1211,25 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
     el.reset();
     await refresh();
   }
-  async function addCard(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const el = event.currentTarget;
-    const form = new FormData(el);
+  async function saveCard(input: {
+    front: string;
+    back: string;
+    deckId: string;
+  }) {
     try {
-      await application.createCard(
-        formText(form, "deckId"),
-        formText(form, "front"),
-        formText(form, "back"),
-      );
-      el.reset();
+      if (editingCard) {
+        await application.editCard(editingCard.id, input.front, input.back);
+      } else {
+        await application.createCard(input.deckId, input.front, input.back);
+      }
       await refresh();
-      setView("library");
+      setCards(await application.loadCards(input.deckId, cardSearch));
+      setEditingCard(null);
+      setSelectedDeckId(input.deckId);
+      setView("deck");
     } catch (error: unknown) {
       setStatus(
-        error instanceof Error
-          ? error.message
-          : "The card could not be created.",
+        error instanceof Error ? error.message : "The card could not be saved.",
       );
     }
   }
@@ -1217,13 +1253,10 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
       );
     }
   }
-  async function editCard(card: LibraryCard) {
-    const front = window.prompt("Question", card.front);
-    if (front === null) return;
-    const back = window.prompt("Answer", card.back);
-    if (back === null) return;
-    await application.editCard(card.id, front, back);
-    setCards(await application.loadCards(card.deckId, cardSearch));
+  function editCard(card: LibraryCard) {
+    setEditingCard(card);
+    setSelectedDeckId(card.deckId);
+    setView("edit");
   }
   async function deleteCard(card: LibraryCard) {
     if (!window.confirm("Move this card to the deleted-items recovery state?"))
@@ -1239,9 +1272,9 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   const selected = decks.find((d) => d.id === selectedDeckId);
   return (
     <div className="min-h-screen bg-canvas text-ink">
-      {view !== "study" && <Sidebar view={view} setView={setView} />}
+      <Sidebar view={view} setView={setView} />
       <main
-        className={`${view === "study" ? "ml-0 max-w-none p-0" : "ml-[220px] max-w-[1060px] px-12 py-[46px] max-md:ml-0 max-md:pt-24"} min-h-screen`}
+        className={`${view === "study" ? "ml-[220px] max-w-none p-0 max-md:ml-0 max-md:pt-16" : "ml-[220px] max-w-[1060px] px-12 py-[46px] max-md:ml-0 max-md:pt-24"} min-h-screen`}
       >
         <span role="status" className="sr-only">
           {status}
@@ -1272,16 +1305,17 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
             search={cardSearch}
             onSearch={setCardSearch}
             onStartStudy={() => void startStudy(selectedDeckId)}
-            onEditCard={(card) => void editCard(card)}
+            onEditCard={editCard}
             onDeleteCard={(card) => void deleteCard(card)}
           />
         )}{" "}
-        {view === "create" && (
-          <CreateCard
+        {(view === "create" || view === "edit") && (
+          <CardEditor
             decks={decks}
             selectedDeckId={selectedDeckId}
             setSelectedDeckId={setSelectedDeckId}
-            onAddCard={(e) => void addCard(e)}
+            card={view === "edit" ? editingCard : null}
+            onSave={saveCard}
             setView={setView}
           />
         )}{" "}

@@ -6,9 +6,33 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { ChevronDown } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  BookOpen,
+  ChartNoAxesCombined,
+  Check,
+  ChevronDown,
+  Folder,
+  House,
+  Layers3,
+  Library as LibraryIcon,
+  Plus,
+  Settings as SettingsIcon,
+} from "lucide-react";
 
 import { measureOperation } from "@shared/index";
+import DOMPurify from "dompurify";
+import katex from "katex";
+import "katex/dist/katex.min.css";
+
+import type {
+  CardAssetInput,
+  CardAssetKind,
+  CardAssetSide,
+  CardContentFormat,
+  CardKind,
+} from "@modules/cards";
 
 export interface LibraryDeck {
   readonly id: string;
@@ -28,6 +52,17 @@ export interface LibraryCard {
   readonly back: string;
   readonly phase: string;
   readonly dueAt: Date;
+  readonly kind?: CardKind;
+  readonly frontFormat?: CardContentFormat;
+  readonly backFormat?: CardContentFormat;
+  readonly assets?: readonly {
+    readonly kind: CardAssetKind;
+    readonly side?: CardAssetSide;
+    readonly name: string;
+    readonly mimeType: string;
+    readonly data: string;
+    readonly size: number;
+  }[];
 }
 export interface StudyState {
   readonly sessionId: string;
@@ -66,11 +101,30 @@ export interface SyncStatusData {
 export interface HafizaAppPort {
   loadLibrary(): Promise<readonly LibraryDeck[]>;
   loadCards(deckId: string, search?: string): Promise<readonly LibraryCard[]>;
+  loadCardsPage(
+    deckId: string,
+    search?: string,
+    offset?: number,
+    limit?: number,
+  ): Promise<{
+    readonly items: readonly LibraryCard[];
+    readonly total: number;
+  }>;
   loadFolders(): Promise<readonly LibraryFolder[]>;
   createDeck(name: string, folderId?: string): Promise<void>;
   createFolder(name: string): Promise<void>;
-  createCard(deckId: string, front: string, back: string): Promise<void>;
-  editCard(id: string, front: string, back: string): Promise<void>;
+  createCard(
+    deckId: string | undefined,
+    front: string,
+    back: string,
+    options?: CardContentOptions,
+  ): Promise<void>;
+  editCard(
+    id: string,
+    front: string,
+    back: string,
+    options?: CardContentOptions,
+  ): Promise<void>;
   deleteCard(id: string): Promise<void>;
   startStudy(deckId?: string): Promise<StudyState>;
   revealStudy(itemId: string): Promise<void>;
@@ -103,6 +157,13 @@ export interface HafizaAppPort {
   subscribeSyncStatus(listener: (status: SyncStatusData) => void): () => void;
   disconnectDrive(): void;
 }
+
+export interface CardContentOptions {
+  readonly kind?: CardKind;
+  readonly frontFormat?: CardContentFormat;
+  readonly backFormat?: CardContentFormat;
+  readonly assets?: readonly CardAssetInput[];
+}
 type View =
   | "today"
   | "library"
@@ -113,29 +174,17 @@ type View =
   | "progress"
   | "settings"
   | "study";
-const samples: readonly LibraryDeck[] = [
-  {
-    id: "sample-anatomy",
-    name: "Anatomy",
-    cardCount: 428,
-    dueCount: 32,
-    folderId: null,
-  },
-  {
-    id: "sample-biochemistry",
-    name: "Biochemistry",
-    cardCount: 216,
-    dueCount: 8,
-    folderId: null,
-  },
-  {
-    id: "sample-pharmacology",
-    name: "Pharmacology",
-    cardCount: 340,
-    dueCount: 18,
-    folderId: null,
-  },
-];
+const viewValues = new Set<View>([
+  "today",
+  "library",
+  "deck",
+  "create",
+  "edit",
+  "import",
+  "progress",
+  "settings",
+  "study",
+]);
 function formText(form: FormData, key: string) {
   const value = form.get(key);
   return typeof value === "string" ? value : "";
@@ -148,6 +197,127 @@ function failureMessage(error: unknown, fallback: string): string {
     return "This device is out of storage. Export a backup, then free browser storage before trying again.";
   }
   return error instanceof Error ? error.message : fallback;
+}
+
+const RICH_TEXT_CONFIG = {
+  ALLOWED_TAGS: [
+    "a",
+    "b",
+    "blockquote",
+    "br",
+    "code",
+    "div",
+    "em",
+    "i",
+    "li",
+    "mark",
+    "ol",
+    "p",
+    "pre",
+    "small",
+    "span",
+    "strong",
+    "sub",
+    "sup",
+    "u",
+    "ul",
+  ],
+  ALLOWED_ATTR: ["href", "target", "rel", "class", "style"],
+};
+const MAX_ASSET_BYTES = 10 * 1024 * 1024;
+const MAX_CARD_ASSET_BYTES = 30 * 1024 * 1024;
+
+function escapeText(value: string): string {
+  return DOMPurify.sanitize(value, {
+    ALLOWED_TAGS: [],
+    ALLOWED_ATTR: [],
+  }).replace(/\n/g, "<br />");
+}
+
+/** Sanitizes user markup first, then lets KaTeX render only math delimiters. */
+function renderCardContent(value: string, format: CardContentFormat = "plain") {
+  const safe =
+    format === "rich"
+      ? DOMPurify.sanitize(value, RICH_TEXT_CONFIG)
+      : escapeText(value);
+  return safe.replace(
+    /\$\$([\s\S]+?)\$\$|\$([^$\n]+)\$/g,
+    (_match: string, block: string | undefined, inline: string | undefined) => {
+      const expression = block ?? inline ?? "";
+      try {
+        return katex.renderToString(expression, {
+          displayMode: Boolean(block),
+          throwOnError: false,
+          output: "htmlAndMathml",
+        });
+      } catch {
+        return escapeText(expression);
+      }
+    },
+  );
+}
+
+function CardContent({
+  value,
+  format,
+  className = "",
+}: {
+  readonly value: string;
+  readonly format?: CardContentFormat | undefined;
+  readonly className?: string;
+}) {
+  return (
+    <span
+      className={className}
+      dangerouslySetInnerHTML={{ __html: renderCardContent(value, format) }}
+    />
+  );
+}
+
+function CardAssets({
+  assets,
+  side,
+}: {
+  readonly assets:
+    | readonly {
+        readonly kind: CardAssetKind;
+        readonly side?: CardAssetSide;
+        readonly name: string;
+        readonly mimeType: string;
+        readonly data: string;
+        readonly size: number;
+      }[]
+    | undefined;
+  readonly side?: CardAssetSide;
+}) {
+  const visibleAssets = assets?.filter(
+    (asset) => (asset.side ?? "front") === (side ?? "front"),
+  );
+  if (!visibleAssets?.length) return null;
+  return (
+    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      {visibleAssets.map((asset) =>
+        asset.kind === "image" ? (
+          <img
+            key={`${asset.name}-${asset.data.slice(-12)}`}
+            src={asset.data}
+            alt={asset.name}
+            loading="lazy"
+            className="max-h-72 max-w-full rounded-lg border border-line object-contain"
+          />
+        ) : (
+          <audio
+            key={`${asset.name}-${asset.data.slice(-12)}`}
+            controls
+            preload="metadata"
+            src={asset.data}
+            aria-label={asset.name}
+            className="w-full"
+          />
+        ),
+      )}
+    </div>
+  );
 }
 function Button({
   children,
@@ -176,25 +346,148 @@ function Button({
     </button>
   );
 }
+interface DropdownOption {
+  readonly value: string;
+  readonly label: string;
+  readonly disabled?: boolean;
+}
 function SelectField({
-  children,
+  options,
+  value = "",
+  name,
+  id,
   className = "",
-  ...props
-}: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  disabled = false,
+  onValueChange,
+  "aria-label": ariaLabel,
+}: {
+  readonly options: readonly DropdownOption[];
+  readonly value?: string;
+  readonly name?: string;
+  readonly id?: string;
+  readonly className?: string;
+  readonly disabled?: boolean;
+  readonly onValueChange?: (value: string) => void;
+  readonly "aria-label"?: string;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const selectedIndex = Math.max(
+    0,
+    options.findIndex((option) => option.value === value),
+  );
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const selected = options[selectedIndex] ?? options[0];
+  const menuId = `${id ?? name ?? "dropdown"}-menu`;
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [open]);
+
+  function choose(option: DropdownOption) {
+    if (option.disabled) return;
+    onValueChange?.(option.value);
+    setOpen(false);
+    buttonRef.current?.focus();
+  }
+  function moveActive(direction: 1 | -1) {
+    const available = options
+      .map((option, index) => (option.disabled ? -1 : index))
+      .filter((index) => index >= 0);
+    if (!available.length) return;
+    const current = available.indexOf(activeIndex);
+    const next =
+      available[(current + direction + available.length) % available.length];
+    if (next !== undefined) setActiveIndex(next);
+  }
+  function handleKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) setOpen(true);
+      moveActive(event.key === "ArrowDown" ? 1 : -1);
+    } else if (event.key === "Home" && open) {
+      event.preventDefault();
+      setActiveIndex(0);
+    } else if (event.key === "End" && open) {
+      event.preventDefault();
+      setActiveIndex(Math.max(0, options.length - 1));
+    } else if ((event.key === "Enter" || event.key === " ") && open) {
+      event.preventDefault();
+      const option = options[activeIndex];
+      if (option) choose(option);
+    } else if (event.key === "Escape" && open) {
+      event.preventDefault();
+      setOpen(false);
+    }
+  }
+
   return (
-    <span className="relative block min-w-0">
-      <select
-        {...props}
-        className={`field peer appearance-none pr-11 ${className}`}
+    <div ref={rootRef} className="relative block min-w-0">
+      {name && <input type="hidden" name={name} value={value} />}
+      <button
+        ref={buttonRef}
+        id={id}
+        type="button"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-controls={menuId}
+        aria-activedescendant={
+          open ? `${menuId}-option-${activeIndex}` : undefined
+        }
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        disabled={disabled}
+        onClick={() => {
+          setActiveIndex(selectedIndex);
+          setOpen((current) => !current);
+        }}
+        onKeyDown={handleKeyDown}
+        className={`field dropdown-trigger flex items-center justify-between gap-3 text-left ${className}`}
       >
-        {children}
-      </select>
-      <ChevronDown
-        aria-hidden="true"
-        strokeWidth={2}
-        className="pointer-events-none absolute right-3.5 top-1/2 size-4 -translate-y-1/2 text-muted transition peer-focus:text-primary peer-disabled:opacity-40"
-      />
-    </span>
+        <span className="truncate">
+          {selected?.label ?? "Choose an option"}
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          strokeWidth={2}
+          className={`size-4 shrink-0 text-muted transition ${open ? "rotate-180 text-primary" : ""}`}
+        />
+      </button>
+      {open && (
+        <div
+          id={menuId}
+          role="listbox"
+          aria-label={ariaLabel}
+          className="dropdown-menu absolute inset-x-0 top-[calc(100%+6px)] z-50 max-h-64 overflow-y-auto rounded-xl border border-line bg-white p-1.5 shadow-float"
+        >
+          {options.map((option, index) => (
+            <button
+              key={option.value || "__empty"}
+              id={`${menuId}-option-${index}`}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              disabled={option.disabled}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => choose(option)}
+              className={`flex min-h-10 w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${index === activeIndex ? "bg-soft text-primary" : "text-ink hover:bg-soft"} disabled:cursor-not-allowed disabled:opacity-45`}
+            >
+              <span className="truncate">{option.label}</span>
+              {option.value === value && (
+                <Check aria-hidden="true" className="size-4 shrink-0" />
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 function Sidebar({
@@ -206,7 +499,11 @@ function Sidebar({
   setView: (view: View) => void;
   syncStatus: SyncStatusData;
 }) {
-  const item = (target: View, label: string, shortLabel: string) => {
+  const item = (
+    target: View,
+    label: string,
+    Icon: React.ComponentType<{ className?: string; strokeWidth?: number }>,
+  ) => {
     const active =
       view === target ||
       (target === "library" && ["deck", "edit", "import"].includes(view)) ||
@@ -222,9 +519,9 @@ function Sidebar({
       >
         <span
           aria-hidden="true"
-          className={`grid size-7 place-items-center rounded-lg text-[11px] font-bold ${active ? "bg-primary text-white" : "bg-white text-muted group-hover:bg-soft"}`}
+          className={`grid size-7 place-items-center rounded-lg ${active ? "bg-primary text-white" : "bg-white text-muted group-hover:bg-soft"}`}
         >
-          {shortLabel}
+          <Icon className="size-[17px]" strokeWidth={2} />
         </span>
         <span className="hidden lg:inline">{label}</span>
         <span className="text-[10px] md:hidden">{label}</span>
@@ -254,11 +551,11 @@ function Sidebar({
         className="flex w-full items-center gap-1 md:grid md:gap-2"
         aria-label="Primary navigation"
       >
-        {item("today", "Today", "T")}
-        {item("library", "Library", "L")}
-        {item("create", "Create", "+")}
-        {item("progress", "Progress", "P")}
-        {item("settings", "Settings", "S")}
+        {item("today", "Today", House)}
+        {item("library", "Library", LibraryIcon)}
+        {item("create", "Create", Plus)}
+        {item("progress", "Progress", ChartNoAxesCombined)}
+        {item("settings", "Settings", SettingsIcon)}
       </nav>
       <div className="mt-auto hidden rounded-xl border border-line bg-white/75 p-4 lg:block">
         <div className="flex items-center gap-2 text-xs font-medium">
@@ -431,7 +728,12 @@ function Today({
               <Button onClick={onStartStudy} variant="inverted">
                 Start review
               </Button>
-              <Button variant="onDark" onClick={() => setView("create")}>
+              <Button
+                variant="onDark"
+                onClick={() => setView("create")}
+                className="inline-flex items-center gap-2"
+              >
+                <Plus aria-hidden="true" className="size-4" />
                 Add cards
               </Button>
             </div>
@@ -485,9 +787,10 @@ function Today({
         </div>
         <button
           onClick={() => setView("library")}
-          className="text-sm font-semibold text-primary"
+          className="inline-flex items-center gap-1 text-sm font-semibold text-primary"
         >
-          View library →
+          View library
+          <ArrowRight aria-hidden="true" className="size-4" />
         </button>
       </div>
       <div className="grid grid-cols-3 gap-5 max-xl:grid-cols-2 max-sm:grid-cols-1">
@@ -578,6 +881,17 @@ function Library({
         action={<Button onClick={() => setView("create")}>+ Create</Button>}
       />
       <section className="card mb-8 p-4 shadow-card sm:p-5">
+        <div className="mb-4 flex items-start gap-3">
+          <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-soft text-primary">
+            <Layers3 aria-hidden="true" className="size-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-semibold">Decks</h2>
+            <p className="mt-1 text-xs text-muted">
+              Decks contain the cards you review and learn.
+            </p>
+          </div>
+        </div>
         <form
           onSubmit={onAddDeck}
           className="grid items-end gap-3 md:grid-cols-[minmax(180px,1fr)_minmax(150px,220px)_auto]"
@@ -592,57 +906,84 @@ function Library({
             placeholder="New deck"
             required
           />
-          <SelectField name="folderId" aria-label="Deck folder">
-            <option value="">No folder</option>
-            {folders.map((folder) => (
-              <option key={folder.id} value={folder.id}>
-                {folder.name}
-              </option>
-            ))}
-          </SelectField>
+          <SelectField
+            name="folderId"
+            aria-label="Deck folder"
+            options={[
+              { value: "", label: "No folder" },
+              ...folders.map((folder) => ({
+                value: folder.id,
+                label: folder.name,
+              })),
+            ]}
+          />
           <Button type="submit">Add</Button>
         </form>
       </section>
 
-      <div className="mb-6 flex flex-wrap items-center gap-3">
-        <button
-          onClick={() => setFolderId(null)}
-          aria-pressed={folderId === null}
-          className={`min-h-10 rounded-full px-4 text-xs font-semibold ${folderId === null ? "bg-primary text-white" : "border border-line bg-white"}`}
-        >
-          All decks
-        </button>
-        {folders.map((folder) => (
+      <section className="card mb-8 p-4 sm:p-5">
+        <div className="mb-4 flex items-start gap-3">
+          <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#f7edd4] text-[#8b641c]">
+            <Folder aria-hidden="true" className="size-5" />
+          </span>
+          <div>
+            <h2 className="text-sm font-semibold">Folders</h2>
+            <p className="mt-1 text-xs text-muted">
+              Folders organize decks; they are optional and never required for
+              cards.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
           <button
-            className={`min-h-10 rounded-full px-4 text-xs font-semibold ${folderId === folder.id ? "bg-primary text-white" : "border border-line bg-white"}`}
-            key={folder.id}
-            onClick={() => setFolderId(folder.id)}
-            aria-pressed={folderId === folder.id}
+            onClick={() => setFolderId(null)}
+            aria-pressed={folderId === null}
+            className={`min-h-10 rounded-full px-4 text-xs font-semibold ${folderId === null ? "bg-primary text-white" : "border border-line bg-white"}`}
           >
-            {folder.name} ·{" "}
-            {decks.filter((deck) => deck.folderId === folder.id).length}
+            All decks
           </button>
-        ))}
-        <form
-          onSubmit={onAddFolder}
-          className="flex min-w-[240px] flex-1 gap-2 sm:max-w-[320px]"
-        >
-          <label className="sr-only" htmlFor="folder-name">
-            New folder
-          </label>
-          <input
-            id="folder-name"
-            name="folderName"
-            className="field"
-            placeholder="New folder"
-            required
-          />
-          <Button type="submit" variant="secondary">
-            Add
-          </Button>
-        </form>
-      </div>
+          {folders.map((folder) => (
+            <button
+              className={`flex min-h-10 items-center gap-2 rounded-full px-4 text-xs font-semibold ${folderId === folder.id ? "bg-primary text-white" : "border border-line bg-white"}`}
+              key={folder.id}
+              onClick={() => setFolderId(folder.id)}
+              aria-pressed={folderId === folder.id}
+            >
+              <Folder aria-hidden="true" className="size-3.5" />
+              {folder.name} ·{" "}
+              {decks.filter((deck) => deck.folderId === folder.id).length}
+            </button>
+          ))}
+          <form
+            onSubmit={onAddFolder}
+            className="flex min-w-[240px] flex-1 gap-2 sm:max-w-[320px]"
+          >
+            <label className="sr-only" htmlFor="folder-name">
+              New folder
+            </label>
+            <input
+              id="folder-name"
+              name="folderName"
+              className="field"
+              placeholder="New folder"
+              required
+            />
+            <Button type="submit" variant="secondary">
+              Add
+            </Button>
+          </form>
+        </div>
+      </section>
 
+      <div className="mb-4 flex items-center gap-3">
+        <BookOpen aria-hidden="true" className="size-5 text-primary" />
+        <div>
+          <h2 className="text-lg font-semibold">Your decks</h2>
+          <p className="text-xs text-muted">
+            Choose a deck to browse its cards.
+          </p>
+        </div>
+      </div>
       <div className="mb-6 grid gap-3 lg:grid-cols-[1fr_auto_auto]">
         <input
           className="field"
@@ -655,14 +996,13 @@ function Library({
           className="min-w-40"
           aria-label="Sort decks"
           value={sort}
-          onChange={(event) =>
-            setSort(event.target.value as "name" | "due" | "cards")
-          }
-        >
-          <option value="name">Sort: Name</option>
-          <option value="due">Sort: Most due</option>
-          <option value="cards">Sort: Most cards</option>
-        </SelectField>
+          onValueChange={(next) => setSort(next as "name" | "due" | "cards")}
+          options={[
+            { value: "name", label: "Sort: Name" },
+            { value: "due", label: "Sort: Most due" },
+            { value: "cards", label: "Sort: Most cards" },
+          ]}
+        />
         <div className="flex rounded-xl border border-line bg-white p-1">
           <button
             type="button"
@@ -713,7 +1053,7 @@ function Library({
               <span
                 className={`grid size-11 shrink-0 place-items-center rounded-xl text-sm font-bold text-primary ${colors[index % colors.length]}`}
               >
-                {deck.name.slice(0, 1).toLocaleUpperCase()}
+                <BookOpen aria-hidden="true" className="size-5" />
               </span>
               <span className="min-w-0 flex-1">
                 <strong className="block truncate text-[15px]">
@@ -739,7 +1079,7 @@ function Library({
               </span>
               {layout === "list" && (
                 <span aria-hidden="true" className="text-primary">
-                  →
+                  <ArrowRight className="size-4" />
                 </span>
               )}
             </button>
@@ -766,6 +1106,9 @@ function Deck({
   onStartStudy,
   onEditCard,
   onDeleteCard,
+  onLoadMore,
+  hasMore,
+  loadingMore,
 }: {
   deck: LibraryDeck | undefined;
   setView: (view: View) => void;
@@ -775,11 +1118,27 @@ function Deck({
   onStartStudy: () => void;
   onEditCard: (card: LibraryCard) => void;
   onDeleteCard: (card: LibraryCard) => void;
+  onLoadMore: () => void;
+  hasMore: boolean;
+  loadingMore: boolean;
 }) {
-  const current = deck ?? samples[0]!;
   const [filter, setFilter] = useState<"all" | "due" | "learning" | "review">(
     "all",
   );
+  if (!deck) {
+    return (
+      <div className="card p-10 text-center">
+        <strong>Deck not found</strong>
+        <p className="mt-2 text-sm text-muted">
+          This deck may have been removed or restored from another backup.
+        </p>
+        <Button className="mt-6" onClick={() => setView("library")}>
+          Return to Library
+        </Button>
+      </div>
+    );
+  }
+  const current = deck;
   const filteredCards = cards.filter((card) => {
     if (filter === "all") return true;
     if (filter === "due") return card.dueAt <= new Date();
@@ -792,10 +1151,11 @@ function Deck({
   return (
     <>
       <button
-        className="mb-6 min-h-10 rounded-lg px-2 text-sm font-medium text-muted hover:bg-white"
+        className="mb-6 inline-flex min-h-10 items-center gap-2 rounded-lg px-2 text-sm font-medium text-muted hover:bg-white"
         onClick={() => setView("library")}
       >
-        ← Library
+        <ArrowLeft aria-hidden="true" className="size-4" />
+        Library
       </button>
       <PageHeading
         title={current.name}
@@ -803,7 +1163,10 @@ function Deck({
         action={
           <div className="flex flex-wrap gap-3">
             <Button variant="secondary" onClick={() => setView("create")}>
-              + Add card
+              <span className="inline-flex items-center gap-2">
+                <Plus aria-hidden="true" className="size-4" />
+                Add card
+              </span>
             </Button>
             <Button onClick={onStartStudy}>Start review</Button>
           </div>
@@ -862,10 +1225,14 @@ function Deck({
             key={card.id}
           >
             <span className="min-w-0">
-              <strong className="block truncate text-sm">{card.front}</strong>
+              <strong className="block truncate text-sm">
+                <CardContent value={card.front} format={card.frontFormat} />
+              </strong>
               <span className="mt-1 block truncate text-xs text-muted">
-                {card.back}
+                <CardContent value={card.back} format={card.backFormat} />
               </span>
+              <CardAssets assets={card.assets} side="front" />
+              <CardAssets assets={card.assets} side="back" />
               <small className="mt-2 block text-[10px] font-semibold uppercase tracking-wide text-primary">
                 {card.phase} · due {card.dueAt.toLocaleDateString()}
               </small>
@@ -895,9 +1262,163 @@ function Deck({
           </div>
         )}
       </div>
+      {hasMore && (
+        <div className="mt-5 text-center">
+          <Button
+            variant="secondary"
+            onClick={onLoadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? "Loading cards…" : "Load more cards"}
+          </Button>
+        </div>
+      )}
     </>
   );
 }
+
+function RichTextField({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  readonly id: string;
+  readonly label: string;
+  readonly value: string;
+  readonly onChange: (value: string) => void;
+}) {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [linkUrl, setLinkUrl] = useState("");
+  // Keep the editable DOM uncontrolled while typing. Replacing innerHTML on
+  // every keystroke resets the browser selection (and makes text appear in
+  // reverse order in some browsers/test environments), so we only hydrate it
+  // when the value changes from outside the editor.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || document.activeElement === editor) return;
+    const nextMarkup = DOMPurify.sanitize(value, RICH_TEXT_CONFIG);
+    if (editor.innerHTML !== nextMarkup) editor.innerHTML = nextMarkup;
+  }, [value]);
+  const run = (command: string, commandValue?: string) => {
+    editorRef.current?.focus();
+    document.execCommand(command, false, commandValue);
+    onChange(editorRef.current?.innerHTML ?? "");
+  };
+  const insertLink = () => {
+    const url = linkUrl.trim();
+    if (!url) return;
+    run("createLink", url);
+    setLinkUrl("");
+  };
+  return (
+    <div className="rounded-xl border border-line bg-white focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/10">
+      <div className="flex flex-wrap items-center gap-1 border-b border-line bg-soft/60 p-2">
+        {(
+          [
+            ["bold", "Bold"],
+            ["italic", "Italic"],
+            ["underline", "Underline"],
+            ["hiliteColor", "Highlight", "#fff1a8"],
+            ["insertUnorderedList", "Bulleted list"],
+            ["insertOrderedList", "Numbered list"],
+            ["superscript", "Superscript"],
+            ["subscript", "Subscript"],
+            ["formatBlock", "Code block", "pre"],
+            ["undo", "Undo"],
+            ["redo", "Redo"],
+          ] as readonly (readonly [string, string, string?])[]
+        ).map(([command, title, value]) => (
+          <button
+            key={title}
+            type="button"
+            title={title}
+            aria-label={title}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => run(command, value)}
+            className="min-h-8 rounded-md px-2 text-xs font-semibold text-muted hover:bg-white hover:text-primary"
+          >
+            {command === "bold"
+              ? "B"
+              : command === "italic"
+                ? "I"
+                : command === "underline"
+                  ? "U"
+                  : title}
+          </button>
+        ))}
+        <label className="ml-auto flex min-h-8 items-center gap-1">
+          <span className="sr-only">Link URL</span>
+          <input
+            className="field h-8 min-w-32 px-2 text-xs"
+            value={linkUrl}
+            onChange={(event) => setLinkUrl(event.target.value)}
+            placeholder="https://…"
+            aria-label="Link URL"
+          />
+          <button
+            type="button"
+            className="min-h-8 rounded-md px-2 text-xs font-semibold text-primary hover:bg-white"
+            onClick={insertLink}
+          >
+            Link
+          </button>
+        </label>
+      </div>
+      <div
+        id={id}
+        ref={editorRef}
+        contentEditable
+        role="textbox"
+        aria-label={label}
+        aria-multiline="true"
+        onInput={() => {
+          const editor = editorRef.current;
+          if (!editor) return;
+          const sanitized = DOMPurify.sanitize(
+            editor.innerHTML,
+            RICH_TEXT_CONFIG,
+          );
+          if (editor.innerHTML !== sanitized) editor.innerHTML = sanitized;
+          onChange(sanitized);
+        }}
+        onPaste={(event) => {
+          // Pasting through execCommand keeps the editor's stored markup
+          // inside the same allow-list as typed/toolbar content.
+          event.preventDefault();
+          const html = event.clipboardData.getData("text/html");
+          const text = event.clipboardData.getData("text/plain");
+          document.execCommand(
+            "insertHTML",
+            false,
+            DOMPurify.sanitize(html || escapeText(text), RICH_TEXT_CONFIG),
+          );
+        }}
+        onKeyDown={(event) => {
+          if (!(event.ctrlKey || event.metaKey)) return;
+          const command =
+            event.key.toLowerCase() === "b"
+              ? "bold"
+              : event.key.toLowerCase() === "i"
+                ? "italic"
+                : event.key.toLowerCase() === "u"
+                  ? "underline"
+                  : null;
+          if (command) {
+            event.preventDefault();
+            run(command);
+          }
+        }}
+        className="field min-h-[140px] rounded-none border-0 p-4 shadow-none focus:ring-0"
+      />
+      <p className="border-t border-line px-4 py-2 text-[10px] text-muted">
+        Supports formatting, lists, links, code, superscript/subscript, and
+        inline `$math$` or block `$$math$$` notation.
+      </p>
+    </div>
+  );
+}
+
 function CardEditor({
   decks,
   selectedDeckId,
@@ -913,7 +1434,8 @@ function CardEditor({
   onSave: (input: {
     front: string;
     back: string;
-    deckId: string;
+    deckId: string | undefined;
+    options: CardContentOptions;
   }) => Promise<void>;
   setView: (view: View) => void;
 }) {
@@ -921,8 +1443,139 @@ function CardEditor({
   const initialBack = card?.back ?? "";
   const [front, setFront] = useState(initialFront);
   const [back, setBack] = useState(initialBack);
+  const [kind, setKind] = useState<CardKind>(card?.kind ?? "basic");
+  const [attachments, setAttachments] = useState<readonly CardAssetInput[]>(
+    () =>
+      card?.assets?.map((asset) => ({
+        kind: asset.kind,
+        ...(asset.side ? { side: asset.side } : {}),
+        name: asset.name,
+        mimeType: asset.mimeType,
+        data: asset.data,
+        size: asset.size,
+      })) ?? [],
+  );
+  const [attachmentSide, setAttachmentSide] = useState<CardAssetSide>("front");
+  const [recording, setRecording] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const initialAssetSignature =
+    card?.assets
+      ?.map((asset) => `${asset.name}:${asset.size}:${asset.data.slice(-24)}`)
+      .join("|") ?? "";
+  const assetSignature = attachments
+    .map((asset) => `${asset.name}:${asset.size}:${asset.data.slice(-24)}`)
+    .join("|");
   const deckId = card?.deckId ?? selectedDeckId;
-  const dirty = front !== initialFront || back !== initialBack;
+  const dirty =
+    front !== initialFront ||
+    back !== initialBack ||
+    assetSignature !== initialAssetSignature ||
+    kind !== (card?.kind ?? "basic");
+  async function addAsset(file: File) {
+    if (!file.type.startsWith("image/") && !file.type.startsWith("audio/")) {
+      return;
+    }
+    if (file.size > MAX_ASSET_BYTES) {
+      window.alert("Images and audio must be smaller than 10 MB.");
+      return;
+    }
+    if (
+      attachments.reduce((total, asset) => total + asset.size, 0) + file.size >
+      MAX_CARD_ASSET_BYTES
+    ) {
+      window.alert("A card can store up to 30 MB of media.");
+      return;
+    }
+    const data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") resolve(reader.result);
+        else reject(new Error("The selected file could not be read."));
+      };
+      reader.onerror = () =>
+        reject(reader.error ?? new Error("File read failed"));
+      reader.readAsDataURL(file);
+    });
+    setAttachments((current) => [
+      ...current,
+      {
+        kind: file.type.startsWith("image/") ? "image" : "audio",
+        side: attachmentSide,
+        name: file.name,
+        mimeType: file.type,
+        data,
+        size: file.size,
+      },
+    ]);
+  }
+  async function startRecording() {
+    setMediaError(null);
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      setMediaError("Audio recording is not supported by this browser.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg",
+      ].find((candidate) => MediaRecorder.isTypeSupported(candidate));
+      const recorder = new MediaRecorder(
+        stream,
+        mimeType ? { mimeType } : undefined,
+      );
+      recordingStreamRef.current = stream;
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const type = recorder.mimeType || "audio/webm";
+        const blob = new Blob(recordingChunksRef.current, { type });
+        const extension = type.includes("ogg") ? "ogg" : "webm";
+        void addAsset(
+          new File([blob], `recording-${Date.now()}.${extension}`, { type }),
+        );
+        stream.getTracks().forEach((track) => track.stop());
+        recordingStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        setRecording(false);
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setRecording(true);
+    } catch {
+      setMediaError("Microphone access was denied or unavailable.");
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+    }
+  }
+  function stopRecording() {
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  }
+  useEffect(
+    () => () => {
+      if (mediaRecorderRef.current?.state === "recording")
+        mediaRecorderRef.current.stop();
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    },
+    [],
+  );
+  function leaveEditor(nextView: View) {
+    if (
+      dirty &&
+      !window.confirm("You have unsaved changes. Leave and discard them?")
+    ) {
+      return;
+    }
+    setView(nextView);
+  }
   useEffect(() => {
     const protectDraft = (event: BeforeUnloadEvent) => {
       if (!dirty) return;
@@ -942,7 +1595,7 @@ function CardEditor({
         }
         action={
           card ? (
-            <Button variant="secondary" onClick={() => setView("deck")}>
+            <Button variant="secondary" onClick={() => leaveEditor("deck")}>
               Cancel
             </Button>
           ) : undefined
@@ -953,7 +1606,7 @@ function CardEditor({
           <p className="mb-3 text-sm">Create with</p>
           <div className="mb-7 flex gap-4">
             <Button>Manual</Button>
-            <Button variant="secondary" onClick={() => setView("import")}>
+            <Button variant="secondary" onClick={() => leaveEditor("import")}>
               Import
             </Button>
           </div>
@@ -962,7 +1615,17 @@ function CardEditor({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          void onSave({ front, back, deckId });
+          void onSave({
+            front,
+            back,
+            deckId,
+            options: {
+              kind,
+              frontFormat: "rich",
+              backFormat: "rich",
+              assets: attachments,
+            },
+          });
         }}
         className="grid grid-cols-[minmax(0,1fr)_340px] gap-6 max-xl:grid-cols-1"
       >
@@ -971,7 +1634,7 @@ function CardEditor({
             <div>
               <strong className="text-sm">Basic card</strong>
               <p className="mt-1 text-xs text-muted">
-                Prompt on the front, recall on the back.
+                Question on the front, answer on the back.
               </p>
             </div>
             <span className="rounded-full bg-soft px-3 py-1 text-[10px] font-semibold text-primary">
@@ -979,8 +1642,15 @@ function CardEditor({
             </span>
           </div>
           <label className="label" htmlFor="card-front">
-            Question
+            Question / Front
           </label>
+          <RichTextField
+            id="card-front"
+            label="Question / Front"
+            value={front}
+            onChange={setFront}
+          />
+          {/*
           <textarea
             id="card-front"
             name="front"
@@ -991,12 +1661,20 @@ function CardEditor({
             placeholder="Type the question or prompt…"
             required
           />
+          */}
           <p className="mt-2 text-right text-[10px] text-muted">
             {front.length} / 10,000
           </p>
           <label className="label mt-5" htmlFor="card-back">
-            Answer
+            Answer / Back
           </label>
+          <RichTextField
+            id="card-back"
+            label="Answer / Back"
+            value={back}
+            onChange={setBack}
+          />
+          {/*
           <textarea
             id="card-back"
             name="back"
@@ -1007,9 +1685,128 @@ function CardEditor({
             placeholder="Write the answer…"
             required
           />
+          */}
           <p className="mt-2 text-right text-[10px] text-muted">
             {back.length} / 10,000
           </p>
+          <div
+            className="mt-5 rounded-xl border border-dashed border-line bg-soft/40 p-4"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              for (const file of event.dataTransfer.files) void addAsset(file);
+            }}
+            onPaste={(event) => {
+              for (const item of event.clipboardData.items) {
+                if (item.kind === "file") {
+                  const file = item.getAsFile();
+                  if (file) void addAsset(file);
+                }
+              }
+            }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <strong className="text-sm">Images and audio</strong>
+                <p className="mt-1 text-xs text-muted">
+                  Drop files here or paste an image. Maximum 10 MB each.
+                </p>
+              </div>
+              <SelectField
+                id="asset-side"
+                value={attachmentSide}
+                onValueChange={(value) =>
+                  setAttachmentSide(value as CardAssetSide)
+                }
+                options={[
+                  { value: "front", label: "Question side" },
+                  { value: "back", label: "Answer side" },
+                ]}
+              />
+              <label className="button-secondary cursor-pointer rounded-[10px] border border-line bg-white px-3 py-2 text-xs font-semibold">
+                Add media
+                <input
+                  type="file"
+                  accept="image/*,audio/*"
+                  multiple
+                  className="sr-only"
+                  onChange={(event) => {
+                    for (const file of event.target.files ?? [])
+                      void addAsset(file);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              {typeof window !== "undefined" &&
+                typeof window.MediaRecorder === "function" &&
+                typeof navigator.mediaDevices?.getUserMedia === "function" && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() =>
+                      recording ? stopRecording() : void startRecording()
+                    }
+                  >
+                    {recording ? "Stop recording" : "Record audio"}
+                  </Button>
+                )}
+            </div>
+            {mediaError && (
+              <p className="mt-2 text-xs text-red-700" role="status">
+                {mediaError}
+              </p>
+            )}
+            {attachments.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {attachments.map((asset, index) => (
+                  <div
+                    className="flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2 text-xs"
+                    key={`${asset.name}-${index}`}
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      {asset.kind === "image" ? (
+                        <img
+                          src={asset.data}
+                          alt=""
+                          className="h-10 w-10 rounded object-cover"
+                        />
+                      ) : (
+                        <audio controls preload="metadata" src={asset.data} />
+                      )}
+                      <span className="truncate">{asset.name}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="font-semibold text-red-700"
+                      onClick={() =>
+                        setAttachments((current) =>
+                          current.filter(
+                            (_, assetIndex) => assetIndex !== index,
+                          ),
+                        )
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <label className="label mt-5" htmlFor="card-kind">
+            Card type
+          </label>
+          <SelectField
+            id="card-kind"
+            value={kind}
+            onValueChange={(value) => setKind(value as CardKind)}
+            options={[
+              { value: "basic", label: "Basic · Front → Back" },
+              { value: "basic-reverse", label: "Basic + Reverse" },
+              { value: "cloze", label: "Cloze-ready" },
+              { value: "rich-media", label: "Rich media" },
+            ]}
+          />
           <label className="label mt-5" htmlFor="card-deck">
             Deck
           </label>
@@ -1017,29 +1814,34 @@ function CardEditor({
             id="card-deck"
             name="deckId"
             value={deckId}
-            onChange={(e) => setSelectedDeckId(e.target.value)}
+            onValueChange={setSelectedDeckId}
             disabled={card !== null}
-            required
-          >
-            {decks.length === 0 && (
-              <option value="">Create a deck first</option>
-            )}
-            {decks.map((deck) => (
-              <option key={deck.id} value={deck.id}>
-                {deck.name}
-              </option>
-            ))}
-          </SelectField>
+            options={[
+              ...(!card ? [{ value: "", label: "Main Deck (default)" }] : []),
+              ...(decks.length === 0 && card
+                ? [{ value: "", label: "Create a deck first" }]
+                : []),
+              ...decks.map((deck) => ({ value: deck.id, label: deck.name })),
+            ]}
+          />
         </div>
         <div className="xl:sticky xl:top-8 xl:self-start">
           <div className="card min-h-[300px] p-6 shadow-card">
             <p className="eyebrow">PREVIEW</p>
             <strong className="mt-8 block text-lg leading-7">
-              {front || "Which nerve innervates…"}
+              {front ? (
+                <CardContent value={front} format="rich" />
+              ) : (
+                "Which nerve innervates…"
+              )}
             </strong>
             <hr className="my-8 border-line" />
             <p className="text-sm leading-6 text-muted">
-              {back || "Your answer preview appears here."}
+              {back ? (
+                <CardContent value={back} format="rich" />
+              ) : (
+                "Your answer preview appears here."
+              )}
             </p>
           </div>
           <p className="my-5 text-xs text-muted">
@@ -1047,11 +1849,7 @@ function CardEditor({
               ? "Changes are saved locally first."
               : "Preview before saving."}
           </p>
-          <Button
-            type="submit"
-            disabled={!decks.length}
-            className="w-full sm:w-auto"
-          >
+          <Button type="submit" className="w-full sm:w-auto">
             {card ? "Save changes" : "Save card"}
           </Button>
         </div>
@@ -1304,9 +2102,10 @@ function Study({
       <div className="mx-auto flex max-w-[980px] items-center justify-between text-sm">
         <button
           onClick={() => setView("today")}
-          className="min-h-10 rounded-lg px-3 font-medium text-muted hover:bg-white"
+          className="inline-flex min-h-10 items-center gap-2 rounded-lg px-3 font-medium text-muted hover:bg-white"
         >
-          ← Exit session
+          <ArrowLeft aria-hidden="true" className="size-4" />
+          Exit session
         </button>
         <span className="rounded-full border border-line bg-white px-3 py-1.5 text-xs text-muted">
           {Math.max(0, state.total - state.current + 1)} remaining
@@ -1340,14 +2139,26 @@ function Study({
         <h1
           className={`${revealed ? "mt-8 text-xl" : "mx-auto mt-20 max-w-[660px] text-2xl sm:mt-24 sm:text-3xl"} font-semibold leading-relaxed tracking-[-0.02em]`}
         >
-          {state.card?.front}
+          {state.card && (
+            <CardContent
+              value={state.card.front}
+              format={state.card.frontFormat}
+            />
+          )}
+          <CardAssets assets={state.card?.assets} side="front" />
         </h1>
         {revealed ? (
           <>
             <hr className="my-7 border-line" />
             <p className="eyebrow">ANSWER</p>
             <h2 className="mt-7 text-xl font-semibold leading-relaxed sm:ml-8 sm:text-2xl">
-              {state.card?.back}
+              {state.card && (
+                <CardContent
+                  value={state.card.back}
+                  format={state.card.backFormat}
+                />
+              )}
+              <CardAssets assets={state.card?.assets} side="back" />
             </h2>
           </>
         ) : (
@@ -1495,15 +2306,12 @@ function ImportCards({
           <SelectField
             id="import-deck"
             value={deckId}
-            onChange={(event) => setDeckId(event.target.value)}
-          >
-            <option value="">Choose a deck</option>
-            {decks.map((deck) => (
-              <option key={deck.id} value={deck.id}>
-                {deck.name}
-              </option>
-            ))}
-          </SelectField>
+            onValueChange={setDeckId}
+            options={[
+              { value: "", label: "Choose a deck" },
+              ...decks.map((deck) => ({ value: deck.id, label: deck.name })),
+            ]}
+          />
           <p className="mt-8 text-sm text-muted">
             Supports CSV and XLSX. Required headers: Question/Answer or
             Front/Back. Optional: Tags.
@@ -1793,6 +2601,8 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   const [decks, setDecks] = useState<readonly LibraryDeck[]>([]);
   const [folders, setFolders] = useState<readonly LibraryFolder[]>([]);
   const [cards, setCards] = useState<readonly LibraryCard[]>([]);
+  const [cardTotal, setCardTotal] = useState(0);
+  const [loadingMoreCards, setLoadingMoreCards] = useState(false);
   const [cardSearch, setCardSearch] = useState("");
   const [studyState, setStudyState] = useState<StudyState | null>(null);
   const [progress, setProgress] = useState<ProgressData | null>(null);
@@ -1807,7 +2617,29 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
     message: "Local data is up to date",
     lastSyncedAt: null,
   });
-  const [view, setView] = useState<View>("today");
+  const [view, setViewState] = useState<View>("today");
+  const setView = useCallback((nextView: View) => {
+    setViewState(nextView);
+    window.history.pushState({ view: nextView }, "", window.location.pathname);
+  }, []);
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+      const state = event.state as { readonly view?: unknown } | null;
+      const nextView = state?.view;
+      setViewState(
+        typeof nextView === "string" && viewValues.has(nextView as View)
+          ? (nextView as View)
+          : "today",
+      );
+    };
+    window.history.replaceState(
+      { view: "today" },
+      "",
+      window.location.pathname,
+    );
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
   const refresh = useCallback(async () => {
     await measureOperation("hafiza.startup", async () => {
       try {
@@ -1842,7 +2674,9 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   useEffect(() => {
     if (!application.driveEnabled()) return;
     const syncOnline = () => {
-      void application.syncIfConnected().catch(() => undefined);
+      void application.syncIfConnected().catch((error: unknown) => {
+        setStatus(failureMessage(error, "Background sync could not complete."));
+      });
     };
     window.addEventListener("online", syncOnline);
     return () => window.removeEventListener("online", syncOnline);
@@ -1850,19 +2684,54 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   useEffect(() => {
     if (view !== "deck" || !selectedDeckId) return;
     let active = true;
-    void application.loadCards(selectedDeckId, cardSearch).then((next) => {
-      if (active) setCards(next);
-    });
+    void application
+      .loadCardsPage(selectedDeckId, cardSearch, 0, 200)
+      .then((next) => {
+        if (!active) return;
+        setCards(next.items);
+        setCardTotal(next.total);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setCards([]);
+        setStatus(failureMessage(error, "The cards could not be loaded."));
+      });
     return () => {
       active = false;
     };
   }, [application, cardSearch, selectedDeckId, view]);
+  async function loadMoreCards() {
+    if (loadingMoreCards || cards.length >= cardTotal || !selectedDeckId) {
+      return;
+    }
+    setLoadingMoreCards(true);
+    try {
+      const next = await application.loadCardsPage(
+        selectedDeckId,
+        cardSearch,
+        cards.length,
+        200,
+      );
+      setCards((current) => [...current, ...next.items]);
+      setCardTotal(next.total);
+    } catch (error: unknown) {
+      setStatus(failureMessage(error, "More cards could not be loaded."));
+    } finally {
+      setLoadingMoreCards(false);
+    }
+  }
   useEffect(() => {
     if (view !== "progress") return;
     let active = true;
-    void application.loadProgress().then((next) => {
-      if (active) setProgress(next);
-    });
+    void application
+      .loadProgress()
+      .then((next) => {
+        if (active) setProgress(next);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setStatus(failureMessage(error, "Progress could not be loaded."));
+      });
     return () => {
       active = false;
     };
@@ -1872,12 +2741,17 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
     const el = event.currentTarget;
     try {
       const form = new FormData(el);
+      const deckName = formText(form, "deckName");
       await application.createDeck(
-        formText(form, "deckName"),
+        deckName,
         formText(form, "folderId") || undefined,
       );
       el.reset();
       await refresh();
+      const created = (await application.loadLibrary()).find(
+        (deck) => deck.name === deckName.trim(),
+      );
+      if (created) setSelectedDeckId(created.id);
     } catch (error: unknown) {
       setStatus(failureMessage(error, "The deck could not be created."));
     }
@@ -1896,19 +2770,40 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   async function saveCard(input: {
     front: string;
     back: string;
-    deckId: string;
+    deckId: string | undefined;
+    options: CardContentOptions;
   }) {
     try {
+      const targetDeckId = input.deckId || decks[0]?.id;
       if (editingCard) {
-        await application.editCard(editingCard.id, input.front, input.back);
+        await application.editCard(
+          editingCard.id,
+          input.front,
+          input.back,
+          input.options,
+        );
       } else {
-        await application.createCard(input.deckId, input.front, input.back);
+        await application.createCard(
+          targetDeckId,
+          input.front,
+          input.back,
+          input.options,
+        );
       }
       await refresh();
-      setCards(await application.loadCards(input.deckId, cardSearch));
+      if (targetDeckId) {
+        const page = await application.loadCardsPage(
+          targetDeckId,
+          cardSearch,
+          0,
+          200,
+        );
+        setCards(page.items);
+        setCardTotal(page.total);
+      }
       setEditingCard(null);
-      setSelectedDeckId(input.deckId);
-      setView("deck");
+      setSelectedDeckId(targetDeckId ?? "");
+      setView(targetDeckId ? "deck" : "library");
     } catch (error: unknown) {
       setStatus(failureMessage(error, "The card could not be saved."));
     }
@@ -1937,7 +2832,14 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
   async function deleteCard(card: LibraryCard) {
     try {
       await application.deleteCard(card.id);
-      setCards(await application.loadCards(card.deckId, cardSearch));
+      const page = await application.loadCardsPage(
+        card.deckId,
+        cardSearch,
+        0,
+        200,
+      );
+      setCards(page.items);
+      setCardTotal(page.total);
       await refresh();
       setStatus("Card moved to the recovery state.");
     } catch (error: unknown) {
@@ -2009,6 +2911,9 @@ export function App({ application }: { readonly application: HafizaAppPort }) {
             onStartStudy={() => void startStudy(selectedDeckId)}
             onEditCard={editCard}
             onDeleteCard={setDeleteCandidate}
+            onLoadMore={() => void loadMoreCards()}
+            hasMore={cards.length < cardTotal}
+            loadingMore={loadingMoreCards}
           />
         )}{" "}
         {(view === "create" || view === "edit") && (

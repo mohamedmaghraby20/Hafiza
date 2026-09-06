@@ -7,6 +7,7 @@ import type {
   SyncCursorRecord,
   SyncOperation,
 } from "@shared/infrastructure/database";
+import type { CardAsset } from "@modules/cards";
 import type { CardTag, Folder, Tag } from "@modules/library";
 import type {
   ReviewEvent,
@@ -22,6 +23,7 @@ export interface HafizaBackup {
   readonly data: {
     readonly decks: readonly PersistedDeck[];
     readonly cards: readonly PersistedCard[];
+    readonly assets: readonly CardAsset[];
     readonly tags: readonly Tag[];
     readonly folders: readonly Folder[];
     readonly cardTags: readonly CardTag[];

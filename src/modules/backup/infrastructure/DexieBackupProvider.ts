@@ -12,6 +12,9 @@ const backupSchema = z.object({
   data: z.object({
     decks: z.array(z.looseObject({ id: z.string() })),
     cards: z.array(z.looseObject({ id: z.string() })),
+    assets: z
+      .array(z.looseObject({ id: z.string(), cardId: z.string() }))
+      .default([]),
     tags: z.array(z.looseObject({ id: z.string() })),
     folders: z.array(z.looseObject({ id: z.string() })),
     cardTags: z.array(z.looseObject({ cardId: z.string(), tagId: z.string() })),
@@ -63,6 +66,7 @@ export class DexieBackupProvider implements BackupProvider {
     const [
       decks,
       cards,
+      assets,
       tags,
       folders,
       cardTags,
@@ -77,6 +81,7 @@ export class DexieBackupProvider implements BackupProvider {
     ] = await Promise.all([
       this.database.decks.toArray(),
       this.database.cards.toArray(),
+      this.database.assets.toArray(),
       this.database.tags.toArray(),
       this.database.folders.toArray(),
       this.database.cardTags.toArray(),
@@ -97,6 +102,7 @@ export class DexieBackupProvider implements BackupProvider {
       data: {
         decks,
         cards,
+        assets,
         tags,
         folders,
         cardTags,
@@ -123,6 +129,7 @@ export class DexieBackupProvider implements BackupProvider {
       await Promise.all([
         this.database.decks.clear(),
         this.database.cards.clear(),
+        this.database.assets.clear(),
         this.database.tags.clear(),
         this.database.folders.clear(),
         this.database.cardTags.clear(),
@@ -131,12 +138,14 @@ export class DexieBackupProvider implements BackupProvider {
         this.database.sessionItems.clear(),
         this.database.dailyStats.clear(),
         this.database.syncOperations.clear(),
+        this.database.devices.clear(),
         this.database.appliedSyncOperations.clear(),
         this.database.syncCursors.clear(),
       ]);
       await Promise.all([
         this.database.decks.bulkPut([...backup.data.decks]),
         this.database.cards.bulkPut([...backup.data.cards]),
+        this.database.assets.bulkPut([...backup.data.assets]),
         this.database.tags.bulkPut([...backup.data.tags]),
         this.database.folders.bulkPut([...backup.data.folders]),
         this.database.cardTags.bulkPut([...backup.data.cardTags]),
@@ -145,6 +154,7 @@ export class DexieBackupProvider implements BackupProvider {
         this.database.sessionItems.bulkPut([...backup.data.sessionItems]),
         this.database.dailyStats.bulkPut([...backup.data.dailyStats]),
         this.database.syncOperations.bulkPut([...backup.data.syncOperations]),
+        this.database.devices.bulkPut([...backup.data.devices]),
         this.database.appliedSyncOperations.bulkPut([
           ...backup.data.appliedSyncOperations,
         ]),

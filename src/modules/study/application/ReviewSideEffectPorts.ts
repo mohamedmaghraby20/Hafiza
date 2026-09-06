@@ -14,7 +14,7 @@ export interface DailyStudyStatsRepository {
 
 export interface PendingSyncOperation {
   readonly id: EntityId;
-  readonly entityType: "deck" | "card" | "tag" | "folder" | "review";
+  readonly entityType: "deck" | "card" | "tag" | "folder" | "review" | "asset";
   readonly entityId: EntityId;
   readonly operation: "upsert" | "delete";
   readonly occurredAt: Date;

@@ -49,8 +49,8 @@ button:disabled {
   cursor: not-allowed;
 }
 :focus-visible {
-  outline: 3px solid rgb(68 56 163 / 35%);
-  outline-offset: 3px;
+  outline: 2px solid rgb(68 56 163 / 24%);
+  outline-offset: 2px;
 }
 @layer components {
   .card {
@@ -91,7 +91,7 @@ button:disabled {
   }
   .field:focus {
     border-color: var(--color-primary);
-    box-shadow: 0 0 0 3px #ece8fb;
+    box-shadow: 0 0 0 2px rgb(68 56 163 / 14%);
   }
   .field::placeholder {
     color: #89909b;
@@ -102,6 +102,10 @@ button:disabled {
     font-size: 13px;
     font-weight: 600;
   }
+}
+.field:focus-visible {
+  outline: none;
+  outline-offset: 0;
 }
 @media (prefers-reduced-motion: reduce) {
   * {

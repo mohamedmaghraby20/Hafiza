@@ -186,6 +186,68 @@ describe("IncrementalSyncService", () => {
     expect((await database.decks.get(deck.id))?.name).toBe("Recovered locally");
   });
 
+  it("projects a remote review into local progress aggregates", async () => {
+    const database = new HafizaDatabase(`sync-review-${testIds.next()}`);
+    databases.push(database);
+    const remote = new MemoryJournalProvider();
+    const remoteDevice = testIds.next();
+    const cardId = testIds.next();
+    const sessionId = testIds.next();
+    const reviewedAt = new Date("2026-09-05T10:00:00.000Z");
+    const scheduling = {
+      phase: "new" as const,
+      dueAt: reviewedAt,
+      intervalDays: 0,
+      easeFactor: 2.5,
+      repetitions: 0,
+      lapses: 0,
+    };
+    const review = {
+      id: testIds.next(),
+      cardId,
+      sessionId,
+      rating: "good" as const,
+      reviewedAt,
+      durationMs: 1_500,
+      previousScheduling: scheduling,
+      newScheduling: scheduling,
+      deviceId: remoteDevice,
+    };
+    remote.journals = [
+      {
+        format: "hafiza-sync",
+        formatVersion: 2,
+        deviceId: remoteDevice,
+        updatedAt: reviewedAt.toISOString(),
+        operations: [
+          {
+            id: testIds.next(),
+            sequence: 1,
+            entityType: "review",
+            entityId: review.id,
+            operation: "upsert",
+            occurredAt: reviewedAt,
+            deviceId: remoteDevice,
+            status: "synced",
+            payload: review,
+          },
+        ],
+      },
+    ];
+
+    await new IncrementalSyncService(database, remote).sync(
+      testIds.next(),
+      "token",
+    );
+
+    expect(await database.reviews.get(review.id)).toEqual(review);
+    expect(await database.dailyStats.get("2026-09-05")).toMatchObject({
+      reviewedCards: 1,
+      correctReviews: 1,
+      studyTimeMs: 1_500,
+    });
+  });
+
   it("rolls back remote operations and its cursor when a payload is invalid", async () => {
     const database = new HafizaDatabase(`sync-rollback-${testIds.next()}`);
     databases.push(database);

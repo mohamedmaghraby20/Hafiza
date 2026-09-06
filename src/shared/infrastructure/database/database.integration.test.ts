@@ -40,6 +40,7 @@ describe("Dexie repositories", () => {
     await database.open();
     expect(database.tables.map((table) => table.name).sort()).toEqual([
       "appliedSyncOperations",
+      "assets",
       "cardTags",
       "cards",
       "dailyStats",
@@ -190,13 +191,17 @@ describe("Dexie repositories", () => {
       syncOperations: "id, status, occurredAt, [status+occurredAt]",
     });
     const deck = createDeckFixture();
+    const legacyCard = { ...createCardFixture(deck.id) };
+    delete (legacyCard as { kind?: unknown }).kind;
     await legacy.table("decks").put({ ...deck, active: 1 });
+    await legacy.table("cards").put({ ...legacyCard, active: 1 });
     legacy.close();
 
     const upgraded = new HafizaDatabase(name);
     expect(await upgraded.decks.get(deck.id)).toMatchObject({
       name: deck.name,
     });
+    expect((await upgraded.cards.get(legacyCard.id))?.kind).toBe("basic");
     expect(upgraded.tables.map((table) => table.name)).toContain("devices");
     expect(upgraded.tables.map((table) => table.name)).toContain(
       "appliedSyncOperations",

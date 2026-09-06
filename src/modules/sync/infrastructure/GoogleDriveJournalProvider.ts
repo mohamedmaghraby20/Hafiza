@@ -10,7 +10,7 @@ const PREFIX = "hafiza-journal-";
 
 const operationSchema = z.looseObject({
   id: z.string(),
-  entityType: z.enum(["deck", "card", "tag", "folder", "review"]),
+  entityType: z.enum(["deck", "card", "tag", "folder", "review", "asset"]),
   entityId: z.string(),
   operation: z.enum(["upsert", "delete"]),
   occurredAt: z.string(),
@@ -109,22 +109,30 @@ export async function decodeJournal(buffer: ArrayBuffer): Promise<SyncJournal> {
 
 export class GoogleDriveJournalProvider implements RemoteJournalProvider {
   async list(accessToken: string): Promise<readonly SyncJournal[]> {
-    const query = new URLSearchParams({
-      spaces: "appDataFolder",
-      q: `name contains '${PREFIX}' and trashed=false`,
-      pageSize: "100",
-      fields: "files(id,name)",
-    });
-    const response = await checked(
-      await fetch(`${API}?${query}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }),
-    );
-    const payload = (await response.json()) as {
-      files?: readonly { id: string }[];
-    };
+    const files: { id: string }[] = [];
+    let pageToken: string | undefined;
+    do {
+      const query = new URLSearchParams({
+        spaces: "appDataFolder",
+        q: `name contains '${PREFIX}' and trashed=false`,
+        pageSize: "100",
+        fields: "nextPageToken,files(id)",
+        ...(pageToken ? { pageToken } : {}),
+      });
+      const response = await checked(
+        await fetch(`${API}?${query}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      );
+      const payload = (await response.json()) as {
+        files?: readonly { id: string }[];
+        nextPageToken?: string;
+      };
+      files.push(...(payload.files ?? []));
+      pageToken = payload.nextPageToken;
+    } while (pageToken);
     return Promise.all(
-      (payload.files ?? []).map(async ({ id }) => {
+      files.map(async ({ id }) => {
         const file = await checked(
           await fetch(`${API}/${id}?alt=media`, {
             headers: { Authorization: `Bearer ${accessToken}` },
@@ -139,9 +147,9 @@ export class GoogleDriveJournalProvider implements RemoteJournalProvider {
     const name = `${PREFIX}${journal.deviceId}.json.gz`;
     const query = new URLSearchParams({
       spaces: "appDataFolder",
-      q: `name contains '${PREFIX}${journal.deviceId}' and trashed=false`,
+      q: `name='${name}' and trashed=false`,
       pageSize: "1",
-      fields: "files(id)",
+      fields: "files(id,etag)",
     });
     const list = await checked(
       await fetch(`${API}?${query}`, {
@@ -149,8 +157,11 @@ export class GoogleDriveJournalProvider implements RemoteJournalProvider {
       }),
     );
     const existing = (
-      (await list.json()) as { files?: readonly { id: string }[] }
-    ).files?.[0]?.id;
+      (await list.json()) as {
+        files?: readonly { id: string; etag?: string }[];
+      }
+    ).files?.[0];
+    const existingId = existing?.id;
     const boundary = `hafiza-${crypto.randomUUID()}`;
     const metadata = existing ? { name } : { name, parents: ["appDataFolder"] };
     const compressed = await encodeJournal(journal);
@@ -164,13 +175,14 @@ export class GoogleDriveJournalProvider implements RemoteJournalProvider {
     await checked(
       await fetch(
         existing
-          ? `${UPLOAD}/${existing}?uploadType=multipart`
+          ? `${UPLOAD}/${existingId}?uploadType=multipart`
           : `${UPLOAD}?uploadType=multipart`,
         {
           method: existing ? "PATCH" : "POST",
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": `multipart/related; boundary=${boundary}`,
+            ...(existing?.etag ? { "If-Match": existing.etag } : {}),
           },
           body,
         },

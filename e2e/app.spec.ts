@@ -17,7 +17,14 @@ test("opens the Hafiza application", async ({ page }) => {
   );
   await page.getByRole("button", { name: "Library", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
-  await expect(page.getByLabel("Deck folder")).toHaveCSS("appearance", "none");
+  const folderDropdown = page.getByRole("combobox", { name: "Deck folder" });
+  await expect(folderDropdown).toHaveAttribute("aria-haspopup", "listbox");
+  await folderDropdown.click();
+  await expect(
+    page.getByRole("listbox", { name: "Deck folder" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(folderDropdown).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator("svg.lucide-chevron-down").first()).toBeVisible();
 
   await page.getByLabel("New deck").fill("Turkish basics");
@@ -27,8 +34,8 @@ test("opens the Hafiza application", async ({ page }) => {
   ).toContainText("0 cards");
 
   await page.getByRole("button", { name: "+ Create" }).click();
-  await page.getByPlaceholder("Type the question or prompt…").fill("Hello");
-  await page.getByPlaceholder("Write the answer…").fill("Merhaba");
+  await page.getByRole("textbox", { name: "Question / Front" }).fill("Hello");
+  await page.getByRole("textbox", { name: "Answer / Back" }).fill("Merhaba");
   await page.getByRole("button", { name: "Save card" }).click();
   await expect(page.getByRole("heading", { name: "Cards" })).toBeVisible();
   await page.getByRole("button", { name: "Library", exact: true }).click();
@@ -126,7 +133,7 @@ test("imports cards and transactionally restores a local backup", async ({
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByLabel("Choose a Hafiza backup").setInputFiles(backupPath);
-  await expect(page.getByText(/1 decks and 1 cards/)).toBeVisible();
+  await expect(page.getByText(/2 decks and 1 cards/)).toBeVisible();
   await page.getByRole("button", { name: "Confirm restore" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(

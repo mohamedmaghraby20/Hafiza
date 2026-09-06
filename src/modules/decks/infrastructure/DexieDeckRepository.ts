@@ -21,6 +21,14 @@ export class DexieDeckRepository implements DeckRepository {
     return deck && (includeDeleted || deck.active === 1) ? toDeck(deck) : null;
   }
 
+  async findByName(name: string): Promise<Deck | null> {
+    const deck = await this.database.decks
+      .where("[active+name]")
+      .equals([1, name])
+      .first();
+    return deck ? toDeck(deck) : null;
+  }
+
   async softDelete(
     id: EntityId,
     deletedAt: Date,

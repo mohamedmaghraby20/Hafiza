@@ -38,4 +38,27 @@ describe("Basic card", () => {
     );
     expect(result.ok).toBe(false);
   });
+
+  it("keeps the reusable card type and rich content metadata", () => {
+    const result = createCard(
+      {
+        deckId: testIds.next(),
+        front: "{{c1::ATP}} is produced by mitochondria",
+        back: "Energy",
+        kind: "cloze",
+        frontFormat: "rich",
+        backFormat: "rich",
+        deviceId: testIds.next(),
+      },
+      { clock: testClock, ids: testIds },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        kind: "cloze",
+        frontFormat: "rich",
+        backFormat: "rich",
+      },
+    });
+  });
 });

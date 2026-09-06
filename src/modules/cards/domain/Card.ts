@@ -7,7 +7,20 @@ import type {
 } from "@shared/index";
 import { trimmedStringSchema, validate } from "@shared/index";
 
-export type CardKind = "basic";
+export type CardKind = "basic" | "basic-reverse" | "cloze" | "rich-media";
+export type CardContentFormat = "plain" | "rich";
+export type CardAssetKind = "image" | "audio";
+export type CardAssetSide = "front" | "back";
+
+export interface CardAssetInput {
+  readonly kind: CardAssetKind;
+  readonly name: string;
+  readonly mimeType: string;
+  /** A data URL keeps the MVP portable and works offline without object URLs. */
+  readonly data: string;
+  readonly size: number;
+  readonly side?: CardAssetSide;
+}
 export type CardPhase = "new" | "learning" | "review" | "relearning";
 
 export interface SchedulingState {
@@ -24,6 +37,9 @@ export interface Card extends SyncedEntity {
   readonly kind: CardKind;
   readonly front: string;
   readonly back: string;
+  readonly frontFormat?: CardContentFormat;
+  readonly backFormat?: CardContentFormat;
+  readonly assetIds?: readonly EntityId[];
   readonly scheduling: SchedulingState;
 }
 
@@ -32,6 +48,10 @@ export interface CreateCardInput {
   readonly front: string;
   readonly back: string;
   readonly deviceId: EntityId;
+  readonly kind?: CardKind;
+  readonly frontFormat?: CardContentFormat;
+  readonly backFormat?: CardContentFormat;
+  readonly assets?: readonly CardAssetInput[];
 }
 
 export function createCard(
@@ -51,9 +71,12 @@ export function createCard(
     value: {
       id: dependencies.ids.next(),
       deckId: input.deckId,
-      kind: "basic",
+      kind: input.kind ?? "basic",
       front: front.value,
       back: back.value,
+      ...(input.frontFormat ? { frontFormat: input.frontFormat } : {}),
+      ...(input.backFormat ? { backFormat: input.backFormat } : {}),
+      ...(input.assets?.length ? { assetIds: [] } : {}),
       scheduling: {
         phase: "new",
         dueAt: now,

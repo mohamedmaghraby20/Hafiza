@@ -7,10 +7,15 @@ optional and is used only for user-initiated Google Drive backup and sync.
 ## Features
 
 - Deck, folder, card, and tag organization
+- Main Deck is created automatically so cards can be written immediately
 - Local SRS review sessions with Again, Hard, Good, and Easy ratings
 - Keyboard review controls: Space reveals; 1–4 rate the card
 - Review history and aggregated progress statistics
 - CSV and XLSX import with validation and confirmation preview
+- Rich, sanitized card editing with offline LaTeX and reusable Basic, Reverse,
+  Cloze, and Rich Media card types
+- Offline image/audio attachments with picker, drag/drop, paste, previews, and
+  supported-browser microphone recording
 - Compressed, versioned `.hafiza` backup and validated restore
 - Optional Google Drive backup and per-device journal synchronization
 - Installable PWA with offline reopening and study support
@@ -91,6 +96,9 @@ are parsed in a Web Worker and must be previewed before import.
 Direct Anki `.apkg` parsing is not included because partial parsing can silently
 lose note-model or media semantics. Export the desired Anki cards as CSV first.
 See [IMPORT_SUPPORT.md](IMPORT_SUPPORT.md).
+
+New profiles receive a `Main Deck` automatically. Creating a card without an
+explicit deck stores it there; folders remain optional organization for decks.
 
 ## Backup and restore
 

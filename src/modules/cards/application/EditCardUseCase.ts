@@ -1,7 +1,7 @@
 import type { Clock, EntityId, Result, ValidationError } from "@shared/index";
 import { NotFoundError, trimmedStringSchema, validate } from "@shared/index";
 
-import type { Card } from "../domain/Card";
+import type { Card, CardContentFormat, CardKind } from "../domain/Card";
 import type { CardRepository } from "../domain/CardRepository";
 
 export interface EditCardInput {
@@ -9,6 +9,10 @@ export interface EditCardInput {
   readonly front: string;
   readonly back: string;
   readonly deviceId: EntityId;
+  readonly kind?: CardKind;
+  readonly frontFormat?: CardContentFormat;
+  readonly backFormat?: CardContentFormat;
+  readonly assetIds?: readonly EntityId[];
 }
 
 export class EditCardUseCase {
@@ -31,6 +35,10 @@ export class EditCardUseCase {
       ...card,
       front: front.value,
       back: back.value,
+      ...(input.kind ? { kind: input.kind } : {}),
+      ...(input.frontFormat ? { frontFormat: input.frontFormat } : {}),
+      ...(input.backFormat ? { backFormat: input.backFormat } : {}),
+      ...(input.assetIds ? { assetIds: input.assetIds } : {}),
       updatedAt: this.clock.now(),
       updatedByDeviceId: input.deviceId,
       revision: card.revision + 1,

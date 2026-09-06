@@ -16,6 +16,7 @@ function createApplication(
     loadLibrary: () => Promise.resolve([]),
     loadFolders: () => Promise.resolve([]),
     loadCards: () => Promise.resolve([]),
+    loadCardsPage: () => Promise.resolve({ items: [], total: 0 }),
     createDeck: () => Promise.resolve(),
     createFolder: () => Promise.resolve(),
     createCard: () => Promise.resolve(),
@@ -94,7 +95,10 @@ const card: LibraryCard = {
   dueAt: new Date("2026-09-04T00:00:00.000Z"),
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "#");
+});
 
 describe("App", () => {
   it("renders the local-first dashboard", async () => {
@@ -116,6 +120,7 @@ describe("App", () => {
         application={createApplication({
           loadLibrary: () => Promise.resolve([deck]),
           loadCards: () => Promise.resolve([card]),
+          loadCardsPage: () => Promise.resolve({ items: [card], total: 1 }),
           editCard,
         })}
       />,
@@ -128,12 +133,12 @@ describe("App", () => {
     await user.click(await screen.findByRole("button", { name: "Edit" }));
 
     expect(screen.getByRole("heading", { name: "Edit card" })).toBeVisible();
-    const question = screen.getByPlaceholderText(
-      "Type the question or prompt…",
-    );
-    const answer = screen.getByPlaceholderText("Write the answer…");
-    expect(question).toHaveValue(card.front);
-    expect(answer).toHaveValue(card.back);
+    const question = screen.getByRole("textbox", {
+      name: "Question / Front",
+    });
+    const answer = screen.getByRole("textbox", { name: "Answer / Back" });
+    expect(question).toHaveTextContent(card.front);
+    expect(answer).toHaveTextContent(card.back);
 
     await user.clear(answer);
     await user.type(answer, "The mitochondrion");
@@ -143,6 +148,11 @@ describe("App", () => {
       card.id,
       card.front,
       "The mitochondrion",
+      expect.objectContaining({
+        kind: "basic",
+        frontFormat: "rich",
+        backFormat: "rich",
+      }),
     );
   });
 

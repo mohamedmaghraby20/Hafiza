@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Folder, Tag } from "@modules/library";
 import type { ReviewEvent } from "@modules/study";
 import type { EntityId } from "@shared/index";
+import type { CardAsset } from "@modules/cards";
 import type {
   HafizaDatabase,
   PersistedCard,
@@ -67,13 +68,18 @@ const payloadSchemas = {
   }),
   card: syncedSchema.extend({
     deckId: z.string(),
-    kind: z.literal("basic"),
+    kind: z
+      .enum(["basic", "basic-reverse", "cloze", "rich-media"])
+      .default("basic"),
     front: z.string(),
     back: z.string(),
     scheduling: schedulingSchema,
     active: z.union([z.literal(0), z.literal(1)]),
     dueAt: z.date(),
     normalizedFront: z.string(),
+    frontFormat: z.enum(["plain", "rich"]).optional(),
+    backFormat: z.enum(["plain", "rich"]).optional(),
+    assetIds: z.array(z.string()).optional(),
   }),
   tag: syncedSchema.extend({ name: z.string() }),
   folder: syncedSchema.extend({
@@ -90,6 +96,15 @@ const payloadSchemas = {
     previousScheduling: schedulingSchema,
     newScheduling: schedulingSchema,
     deviceId: z.string(),
+  }),
+  asset: syncedSchema.extend({
+    cardId: z.string(),
+    kind: z.enum(["image", "audio"]),
+    side: z.enum(["front", "back"]).optional().default("front"),
+    name: z.string(),
+    mimeType: z.string(),
+    data: z.string(),
+    size: z.number().nonnegative(),
   }),
 } as const;
 
@@ -211,6 +226,7 @@ export class IncrementalSyncService {
     if (entityType === "deck") return this.database.decks.get(id);
     if (entityType === "tag") return this.database.tags.get(id);
     if (entityType === "folder") return this.database.folders.get(id);
+    if (entityType === "asset") return this.database.assets.get(id);
     return this.database.reviews.get(id);
   }
 
@@ -275,10 +291,46 @@ export class IncrementalSyncService {
       const local = await this.database.folders.get(folder.id);
       if (remoteEntityWins(folder, local))
         await this.database.folders.put(folder);
+    } else if (operation.entityType === "asset") {
+      const asset = payload as CardAsset;
+      const local = await this.database.assets.get(asset.id);
+      if (remoteEntityWins(asset, local)) await this.database.assets.put(asset);
     } else {
       const review = payload as ReviewEvent;
       if (!(await this.database.reviews.get(review.id))) {
         await this.database.reviews.add(review);
+        const date = review.reviewedAt.toISOString().slice(0, 10);
+        const daily = (await this.database.dailyStats.get(date)) ?? {
+          date,
+          reviewedCards: 0,
+          correctReviews: 0,
+          studyTimeMs: 0,
+        };
+        await this.database.dailyStats.put({
+          ...daily,
+          reviewedCards: daily.reviewedCards + 1,
+          correctReviews:
+            daily.correctReviews + (review.rating === "again" ? 0 : 1),
+          studyTimeMs: daily.studyTimeMs + review.durationMs,
+        });
+        const session = await this.database.sessions.get(review.sessionId);
+        if (session) {
+          await this.database.sessions.put({
+            ...session,
+            reviewedCount: session.reviewedCount + 1,
+          });
+        }
+        const sessionItem = await this.database.sessionItems
+          .where("sessionId")
+          .equals(review.sessionId)
+          .filter((item) => item.cardId === review.cardId)
+          .first();
+        if (sessionItem && !sessionItem.reviewedAt) {
+          await this.database.sessionItems.put({
+            ...sessionItem,
+            reviewedAt: review.reviewedAt,
+          });
+        }
       }
     }
   }

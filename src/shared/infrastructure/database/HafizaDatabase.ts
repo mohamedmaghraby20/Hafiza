@@ -8,6 +8,7 @@ import type {
   StudySession,
   StudySessionItem,
 } from "@modules/study";
+import type { CardAsset } from "@modules/cards";
 import type { EntityId } from "@shared/index";
 
 export interface PersistedDeck extends Deck {
@@ -29,7 +30,7 @@ export interface DailyStudyStats {
 
 export interface SyncOperation {
   readonly id: EntityId;
-  readonly entityType: "deck" | "card" | "tag" | "folder" | "review";
+  readonly entityType: "deck" | "card" | "tag" | "folder" | "review" | "asset";
   readonly entityId: EntityId;
   readonly operation: "upsert" | "delete";
   readonly occurredAt: Date;
@@ -58,6 +59,7 @@ export interface SyncCursorRecord {
 export class HafizaDatabase extends Dexie {
   decks!: EntityTable<PersistedDeck, "id">;
   cards!: EntityTable<PersistedCard, "id">;
+  assets!: EntityTable<CardAsset, "id">;
   tags!: EntityTable<Tag, "id">;
   folders!: EntityTable<Folder, "id">;
   cardTags!: Table<CardTag, [EntityId, EntityId]>;
@@ -94,5 +96,20 @@ export class HafizaDatabase extends Dexie {
     this.version(4).stores({
       syncCursors: "deviceId, updatedAt",
     });
+    this.version(5).stores({
+      assets: "id, cardId, kind, createdAt",
+    });
+    // Legacy cards predate flexible card types. Materialize the default kind
+    // once during migration so every later read/sync can rely on it.
+    this.version(6)
+      .stores({})
+      .upgrade((transaction) =>
+        transaction
+          .table("cards")
+          .toCollection()
+          .modify((card: { kind?: string }) => {
+            if (!card.kind) card.kind = "basic";
+          }),
+      );
   }
 }
